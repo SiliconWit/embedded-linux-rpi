@@ -1,0 +1,160 @@
+---
+title: "Embedded Linux with RPi"
+description: "Build embedded Linux systems on the Raspberry Pi Zero 2 W. Eight lessons from cross-compilation and custom kernels to device trees, kernel modules, Buildroot, systemd services, and production-grade Yocto images."
+pubDate: 2026-04-18
+tags: ["embedded-linux", "raspberry-pi", "kernel", "device-tree", "buildroot", "yocto", "kernel-modules", "cross-compilation", "systemd", "drivers"]
+excerpt: "Master embedded Linux development on the Raspberry Pi Zero 2 W. Build custom kernels, write device tree overlays, develop kernel modules, create minimal images with Buildroot, and produce production-grade firmware with Yocto. The bridge from microcontrollers to Linux systems."
+heroImage: "https://cdn.siliconwit.com/education/pcb-design-kicad/pcb-design-kicad.png"
+---
+
+import Copyright from '../../../../components/Copyright.astro';
+import TawkWidget from '../../../../components/TawkWidget.astro';
+import { Card, CardGrid, Badge, Steps } from '@astrojs/starlight/components';
+
+Microcontrollers run one program. Embedded Linux runs an entire operating system on a chip smaller than a coin. The Raspberry Pi Zero 2 W costs $15 and runs a full Linux kernel with Wi-Fi, USB, and enough processing power for computer vision, web servers, and database logging. This course teaches you to build, customize, and ship Linux-based embedded systems from the ground up. #EmbeddedLinux #RaspberryPi #LinuxKernel
+
+## Why Embedded Linux?
+
+<CardGrid>
+  <Card title="Different Paradigm, Essential Skill" icon="open-book">
+    Embedded Linux is not "Linux on a microcontroller." It is a different programming model: userspace vs kernel space, device trees, process isolation, filesystems. Engineers who understand both bare-metal and Linux are rare and in demand.
+  </Card>
+
+  <Card title="Build Your Own Linux" icon="approve-check">
+    Not Raspbian with apt-get. You will cross-compile your own kernel, write your own device tree overlays, build your own root filesystem with Buildroot, and eventually produce a complete custom image with Yocto. You control every byte.
+  </Card>
+
+  <Card title="Kernel Module Development" icon="setting">
+    Write a real character device driver that appears as /dev/mydevice. Understand the kernel build system, module parameters, sysfs interfaces, and the boundary between userspace and kernel space. Lesson 5 is a complete driver development tutorial.
+  </Card>
+
+  <Card title="Production with Yocto" icon="rocket">
+    Yocto is the industry standard for building production embedded Linux images. Custom layers, recipes, SDK generation, and reproducible builds. Lesson 8 produces an image you could ship.
+  </Card>
+</CardGrid>
+
+## Course Structure
+
+Each lesson follows a consistent cycle:
+
+<Steps>
+1. **The System Problem**
+   A real embedded Linux challenge. Not "install Raspbian" but "build a minimal Linux that boots to your application in 4 seconds."
+
+2. **Linux Internals**
+   How the relevant subsystem works: boot sequence, device model, virtual filesystem, kernel build system.
+
+3. **Build and Configure**
+   Cross-compile on your PC, configure with menuconfig or devicetree, and deploy to the Pi Zero 2 W.
+
+4. **Deploy and Test**
+   Flash the SD card, boot, connect via serial console, and verify the system behaves as designed.
+
+5. **Production Considerations**
+   What changes when this is not a hobby project: read-only root, watchdog, logging, update mechanisms.
+</Steps>
+
+## Lessons
+
+<CardGrid>
+  <Card title="Lesson 1: Cross-Compilation and Boot Process" icon="star">
+    [Cross-Compilation and Boot Process](./cross-compilation-boot-process). Set up a cross-compilation toolchain, understand the Linux boot sequence (bootloader, kernel, initramfs, root filesystem), and cross-compile a custom binary. Build a "hello from custom Linux" that runs on first boot.
+    **Build:** Custom hello binary on first boot. **Parts:** RPi Zero 2 W, SD card, USB-serial adapter.
+  </Card>
+
+  <Card title="Lesson 2: Kernel Configuration and Custom Build" icon="document">
+    [Kernel Configuration and Custom Build](./kernel-configuration-custom-build). Clone the kernel source, navigate menuconfig, enable and disable subsystems, and build a minimal kernel from scratch. Build a stripped-down kernel that boots in under 4 seconds.
+    **Build:** Fast-booting minimal kernel. **Parts:** No new parts.
+  </Card>
+
+  <Card title="Lesson 3: Device Trees and Hardware Description" icon="document">
+    [Device Trees and Hardware Description](./device-trees-hardware-description). Learn DTS syntax, property bindings, and overlay mechanics. Enable custom I2C and SPI devices through device tree overlays without modifying the kernel. Write an overlay for a BME280 sensor.
+    **Build:** Custom device tree overlay for BME280. **Parts:** BME280 module (reuse from prior courses).
+  </Card>
+
+  <Card title="Lesson 4: Userspace I/O: GPIO, I2C, SPI" icon="document">
+    [Userspace GPIO, I2C, SPI](./userspace-gpio-i2c-spi). Access hardware from userspace using libgpiod, i2c-dev, and spidev. Understand character devices, ioctl, and userspace driver patterns. Build a GPIO doorbell monitor with I2C sensor logging.
+    **Build:** GPIO doorbell monitor with sensor logging. **Parts:** Push button, LED, reuse BME280.
+  </Card>
+
+  <Card title="Lesson 5: Linux Kernel Module Development" icon="document">
+    [Kernel Module Development](./kernel-module-development). Write a loadable kernel module from scratch: module skeleton, Makefile, parameters, sysfs attributes, and a character device interface. Build a custom driver that controls LED patterns via /dev/mydevice.
+    **Build:** Custom character device driver for LED patterns. **Parts:** LEDs, resistors (reuse from prior courses).
+  </Card>
+
+  <Card title="Lesson 6: Buildroot: Custom Linux from Scratch" icon="document">
+    [Buildroot: Custom Linux Image](./buildroot-custom-linux-image). Configure Buildroot to produce a minimal Linux image: select packages, add root filesystem overlays, create custom package recipes. Build a minimal image that boots directly to your sensor application.
+    **Build:** Minimal Linux image with baked-in sensor app. **Parts:** No new parts.
+  </Card>
+
+  <Card title="Lesson 7: System Services and Process Management" icon="document">
+    [System Services and Process Management](./system-services-process-management). Write systemd unit files, configure watchdog supervision, implement IPC (pipes, shared memory, Unix sockets), and set up real-time scheduling with PREEMPT_RT. Build a systemd-managed sensor daemon.
+    **Build:** systemd-managed sensor daemon with IPC. **Parts:** Reuse existing.
+  </Card>
+
+  <Card title="Lesson 8: Yocto Project and Production Images" icon="document">
+    [Yocto Project and Production Images](./yocto-production-images). Set up the Yocto build system with BitBake. Create custom layers, write recipes, generate an SDK, and produce a reproducible production image. Build an OTA-ready production image with your custom BSP layer.
+    **Build:** Production-grade Yocto image. **Parts:** No new parts.
+  </Card>
+</CardGrid>
+
+## Parts Kit
+
+**Minimal new hardware required.** Most parts are reused from earlier courses.
+
+| Part | Quantity | First Used | Approximate Cost |
+|------|----------|------------|-----------------|
+| Raspberry Pi Zero 2 W | 1 | Lesson 1 | $15 |
+| MicroSD card (16GB+) | 1 | Lesson 1 | $5 |
+| USB-serial adapter (FTDI or CP2102) | 1 | Lesson 1 | $2-4 |
+| Micro USB OTG cable | 1 | Lesson 1 | $1 |
+| BME280 sensor module | 1 | Lesson 3 | Reuse |
+| Push button + LED + resistors | Few | Lesson 4 | Reuse |
+
+**Total estimated cost: $23-25** (if you have components from prior courses)
+
+## Skill Progression
+
+| Skill | Lessons 1-2 | Lessons 3-4 | Lessons 5-6 | Lessons 7-8 |
+|-------|------------|------------|------------|------------|
+| **System** | Cross-toolchain, boot sequence, kernel build | Device trees, userspace drivers | Kernel modules, Buildroot | systemd, Yocto |
+| **Linux** | menuconfig, initramfs | DTS overlays, /dev nodes | Module Makefile, sysfs, chardev | Unit files, BitBake recipes |
+| **Hardware** | Serial console, SD card boot | I2C/SPI from userspace | GPIO from kernel space | Full system integration |
+| **Production** | Fast boot | Custom hardware support | Minimal root filesystem | Reproducible images, SDK |
+
+## Prerequisites
+
+<Badge text="Embedded and Linux command-line experience required" variant="caution" />
+
+**You should be comfortable with:**
+- C programming (pointers, structs, Makefiles)
+- Linux command line (shell, file permissions, package management, ssh)
+- Basic embedded concepts from at least one prior course
+- Our [Embedded Programming: ATmega328P](/education/embedded-programming-atmega328p/) or another embedded course
+
+**Helpful but not required:**
+- Kernel/OS concepts (processes, virtual memory, filesystems)
+- Git version control
+- Python (for build system scripting)
+
+## Getting Started
+
+<Steps>
+1. **Get a Raspberry Pi Zero 2 W**, a microSD card, and a **USB-serial adapter** (CP2102 or FTDI). Total cost: about $22.
+
+2. **Use a Linux PC for development.** Cross-compilation and kernel building work best on a native Linux machine or VM. Ubuntu 22.04+ recommended. Lessons 6 and 8 (Buildroot, Yocto) require significant disk space (30GB+).
+
+3. **Connect via serial console**, not HDMI. The serial adapter gives you boot messages, kernel logs, and a root shell. This is how embedded Linux development actually works.
+
+4. **Start with Lesson 1.** Cross-compile a binary on your PC and run it on the Pi. This immediately establishes the embedded Linux development workflow.
+
+5. **Work through lessons in order.** Each lesson builds on the system configuration from previous lessons.
+</Steps>
+
+:::tip[Desktop Linux is not embedded Linux]
+If you have used Raspbian/Raspberry Pi OS, that is desktop Linux on a small board. Embedded Linux means you control everything: which kernel modules load, which services start, what is in the root filesystem, and how the system boots. This course teaches that difference from Lesson 1.
+:::
+
+<Copyright />
+
+<TawkWidget />
