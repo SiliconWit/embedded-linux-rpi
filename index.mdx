@@ -1,35 +1,37 @@
 ---
 title: "Embedded Linux with RPi"
-description: "Build embedded Linux systems on the Raspberry Pi Zero 2 W. Eight lessons from cross-compilation and custom kernels to device trees, kernel modules, Buildroot, systemd services, and production-grade Yocto images."
-pubDate: 2026-04-18
+description: "Build embedded Linux systems on the Raspberry Pi Zero 2 W. Nine lessons from cross-compilation and custom kernels to device trees, kernel modules, Buildroot, systemd services, production-grade Yocto images, and a capstone edge gateway project."
+pubDate: 2026-01-24
 tags: ["embedded-linux", "raspberry-pi", "kernel", "device-tree", "buildroot", "yocto", "kernel-modules", "cross-compilation", "systemd", "drivers"]
 excerpt: "Master embedded Linux development on the Raspberry Pi Zero 2 W. Build custom kernels, write device tree overlays, develop kernel modules, create minimal images with Buildroot, and produce production-grade firmware with Yocto. The bridge from microcontrollers to Linux systems."
-heroImage: "https://cdn.siliconwit.com/education/pcb-design-kicad/pcb-design-kicad.png"
+heroImage: "https://cdn.siliconwit.com/education/embedded-linux-rpi/RaspberryPi-Zero-2W-Single-Board-Computer.jpg"
 ---
 
 import Copyright from '../../../../components/Copyright.astro';
 import TawkWidget from '../../../../components/TawkWidget.astro';
 import { Card, CardGrid, Badge, Steps } from '@astrojs/starlight/components';
 
-Microcontrollers run one program. Embedded Linux runs an entire operating system on a chip smaller than a coin. The Raspberry Pi Zero 2 W costs $15 and runs a full Linux kernel with Wi-Fi, USB, and enough processing power for computer vision, web servers, and database logging. This course teaches you to build, customize, and ship Linux-based embedded systems from the ground up. #EmbeddedLinux #RaspberryPi #LinuxKernel
+Microcontrollers run one program. Embedded Linux runs an entire operating system on a chip smaller than a coin. The Raspberry Pi Zero 2 W costs about 15 USD and runs a full Linux kernel with Wi-Fi, USB, and enough processing power for computer vision, web servers, and database logging. This course teaches you to build, customize, and ship Linux-based embedded systems from the ground up. #EmbeddedLinux #RaspberryPi #LinuxKernel
 
-## Why Embedded Linux?
+## Why Embedded Linux When We Already Have Microcontrollers?
+
+The previous courses in this series (ATmega328P, STM32, ESP32, RPi Pico, RTOS) teach you to read sensors, drive actuators, and communicate over UART/SPI/I2C on bare metal. That is powerful, but there are entire categories of embedded products that microcontrollers simply cannot handle:
 
 <CardGrid>
-  <Card title="Different Paradigm, Essential Skill" icon="open-book">
-    Embedded Linux is not "Linux on a microcontroller." It is a different programming model: userspace vs kernel space, device trees, process isolation, filesystems. Engineers who understand both bare-metal and Linux are rare and in demand.
+  <Card title="What Microcontrollers Cannot Do" icon="warning">
+    Run a database to store months of sensor history. Serve a full web dashboard with authentication. Process camera images with OpenCV. Run Python or Node.js scripts. Connect to USB peripherals with standard drivers. Host an SSH server for remote maintenance. Support over-the-air updates with rollback. These all require an operating system.
   </Card>
 
-  <Card title="Build Your Own Linux" icon="approve-check">
-    Not Raspbian with apt-get. You will cross-compile your own kernel, write your own device tree overlays, build your own root filesystem with Buildroot, and eventually produce a complete custom image with Yocto. You control every byte.
+  <Card title="What This Course Builds (That MCU Courses Cannot)" icon="star">
+    A systemd-managed sensor daemon that auto-starts, recovers from crashes, logs structured data to journald, and communicates over Unix sockets. A custom kernel stripped to boot in under 4 seconds. A production-grade Yocto image with A/B OTA updates, license compliance, and an SDK for your team. None of this is possible on a microcontroller.
   </Card>
 
-  <Card title="Kernel Module Development" icon="setting">
-    Write a real character device driver that appears as /dev/mydevice. Understand the kernel build system, module parameters, sysfs interfaces, and the boundary between userspace and kernel space. Lesson 5 is a complete driver development tutorial.
+  <Card title="The Industrial Reality" icon="approve-check">
+    Industrial gateways, medical devices, smart cameras, point-of-sale terminals, and automotive infotainment all run embedded Linux. Companies hiring for these roles expect you to know kernel configuration, device trees, Buildroot, and Yocto. Bare-metal skills are the foundation; embedded Linux is where the higher-paying jobs are.
   </Card>
 
-  <Card title="Production with Yocto" icon="rocket">
-    Yocto is the industry standard for building production embedded Linux images. Custom layers, recipes, SDK generation, and reproducible builds. Lesson 8 produces an image you could ship.
+  <Card title="Not Raspbian with apt-get" icon="setting">
+    This is not a "use Raspberry Pi OS" course. You will cross-compile your own kernel, write your own device tree overlays, develop a real kernel module (character device driver), build a minimal image with Buildroot, and produce a shippable Yocto image. You control every byte on the SD card.
   </Card>
 </CardGrid>
 
@@ -96,6 +98,11 @@ Each lesson follows a consistent cycle:
     [Yocto Project and Production Images](./yocto-production-images). Set up the Yocto build system with BitBake. Create custom layers, write recipes, generate an SDK, and produce a reproducible production image. Build an OTA-ready production image with your custom BSP layer.
     **Build:** Production-grade Yocto image. **Parts:** No new parts.
   </Card>
+
+  <Card title="Lesson 9: Edge Gateway for MCU Sensor Networks" icon="rocket">
+    [Edge Gateway for MCU Sensor Networks](./edge-gateway-mcu-sensor-network). Combine everything from this course and the entire embedded series. Build an edge gateway that receives MQTT data from ESP32/Pico nodes, stores readings in SQLite, serves a live web dashboard, captures USB webcam snapshots, and forwards to the cloud. Does things MCUs cannot handle and does them more reliably than stock Raspberry Pi OS.
+    **Build:** Complete edge gateway with MQTT broker, database, dashboard, camera, OTA. **Parts:** USB webcam (optional).
+  </Card>
 </CardGrid>
 
 ## Parts Kit
@@ -110,17 +117,18 @@ Each lesson follows a consistent cycle:
 | Micro USB OTG cable | 1 | Lesson 1 | $1 |
 | BME280 sensor module | 1 | Lesson 3 | Reuse |
 | Push button + LED + resistors | Few | Lesson 4 | Reuse |
+| USB webcam (any UVC-compatible) | 1 | Lesson 9 | ~5 USD (optional) |
 
-**Total estimated cost: $23-25** (if you have components from prior courses)
+**Total estimated cost: 23 to 30 USD** (if you have components from prior courses)
 
 ## Skill Progression
 
-| Skill | Lessons 1-2 | Lessons 3-4 | Lessons 5-6 | Lessons 7-8 |
+| Skill | Lessons 1-2 | Lessons 3-4 | Lessons 5-6 | Lessons 7-9 |
 |-------|------------|------------|------------|------------|
-| **System** | Cross-toolchain, boot sequence, kernel build | Device trees, userspace drivers | Kernel modules, Buildroot | systemd, Yocto |
-| **Linux** | menuconfig, initramfs | DTS overlays, /dev nodes | Module Makefile, sysfs, chardev | Unit files, BitBake recipes |
-| **Hardware** | Serial console, SD card boot | I2C/SPI from userspace | GPIO from kernel space | Full system integration |
-| **Production** | Fast boot | Custom hardware support | Minimal root filesystem | Reproducible images, SDK |
+| **System** | Cross-toolchain, boot sequence, kernel build | Device trees, userspace drivers | Kernel modules, Buildroot | systemd, Yocto, edge gateway |
+| **Linux** | menuconfig, initramfs | DTS overlays, /dev nodes | Module Makefile, sysfs, chardev | Unit files, BitBake, MQTT/SQLite |
+| **Hardware** | Serial console, SD card boot | I2C/SPI from userspace | GPIO from kernel space | Full system + USB camera |
+| **Production** | Fast boot | Custom hardware support | Minimal root filesystem | Reproducible images, OTA, deployment |
 
 ## Prerequisites
 

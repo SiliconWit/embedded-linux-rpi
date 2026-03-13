@@ -1,0 +1,923 @@
+---
+title: "Buildroot: Custom Linux from Scratch"
+description: "Use Buildroot to create a minimal Linux image for the Raspberry Pi Zero 2 W that boots directly into your sensor application. Covers configuration, package selection, root filesystem overlays, and custom package recipes"
+contributors: "sam-macharia,lawrence-langat"
+pubDate: 2026-02-28
+tags: ["embedded-linux", "buildroot", "custom-image", "rootfs", "minimal-linux", "raspberry-pi"]
+excerpt: "Configure Buildroot to generate a complete, minimal Linux image for the Raspberry Pi Zero 2 W. The image includes only the kernel, BusyBox utilities, your sensor application, and nothing else. This lesson covers the Buildroot configuration system, adding custom packages, creating root filesystem overlays, and producing a flashable SD card image from a single make command."
+heroImage: "https://cdn.siliconwit.com/education/embedded-linux-rpi/buildroot-custom-linux-image.png"
+---
+
+import TawkWidget from '../../../../components/TawkWidget.astro';
+import UniversalContentContributors from '../../../../components/UniversalContentContributors.astro';
+import InArticleAd from '../../../../components/InArticleAd.astro';
+import Copyright from '../../../../components/Copyright.astro';
+import BionicText from '../../../../components/BionicText.astro';
+import TailwindWrapper from '../../../../components/TailwindWrapper.jsx';
+import { Tabs, TabItem } from '@astrojs/starlight/components';
+import { Card, CardGrid, Badge, Steps, LinkButton, FileTree } from '@astrojs/starlight/components';
+
+<UniversalContentContributors 
+  contributors={frontmatter.contributors}
+/>
+
+
+
+import EmbeddedLinuxRpiComments from '../../../../components/embedded-linux-rpi/EmbeddedLinuxRpiComments.astro';
+
+A full Raspbian image carries hundreds of packages your embedded device will never use: a desktop environment, office tools, games, and services that consume memory and slow boot time. For a dedicated sensor node or industrial controller, you want an image containing only what your application needs. Buildroot is a build system that takes a configuration file and produces a complete Linux image (bootloader, kernel, root filesystem) with exactly the packages you select. In this lesson, you will configure Buildroot for the Raspberry Pi Zero 2 W, add the sensor application from earlier lessons as a custom package, lay down configuration files through a filesystem overlay, and generate a flashable SD card image. The final image boots directly into your application with nothing else running. #Buildroot #MinimalLinux #EmbeddedSystems
+
+## What We Are Building
+
+<Card title="Minimal Buildroot Image with Sensor Application" icon="star">
+A self-contained Linux image under 32 MB that boots the Raspberry Pi Zero 2 W directly into a sensor monitoring application. The image contains a custom-compiled kernel, BusyBox for essential shell utilities, your BME280 sensor reader as a custom Buildroot package, and a simple init script that launches the application at boot. No package manager, no login prompt, no unnecessary services.
+</Card>
+
+**Image specifications:**
+
+| Parameter | Value |
+|-----------|-------|
+| Build system | Buildroot (latest stable) |
+| Target | Raspberry Pi Zero 2 W (AArch64) |
+| Kernel | Custom-configured (from Lesson 2) |
+| Init system | BusyBox init (simple, fast) |
+| Root filesystem | ext4, read-only with tmpfs overlay for runtime data |
+| Image size | Under 32 MB (SD card image) |
+| Custom package | sensor-monitor (BME280 reader + logger) |
+| Filesystem overlay | /etc configuration, init scripts, application config |
+| Build output | sdcard.img (ready to flash with dd or Etcher) |
+| Build time | Approximately 20 to 40 minutes on a modern x86_64 host |
+
+### Buildroot Package Summary
+
+| Package | Purpose |
+|---------|---------|
+| busybox | Shell, coreutils, init, networking basics |
+| sensor-monitor | Custom package: BME280 reader application |
+| i2c-tools | Debugging I2C bus during development |
+| dropbear | Lightweight SSH (optional, for remote access) |
+
+## What is Buildroot?
+
+<InArticleAd />
+
+
+Buildroot is an open-source build system that generates a complete embedded Linux image (cross-compilation toolchain, kernel, bootloader, and root filesystem) from source. You describe what you want through a configuration file, run `make`, and get a flashable image. Unlike Yocto (which uses a layer-based architecture with its own package format, recipe language, and extensive caching), Buildroot is simpler and faster to learn. A first Buildroot image can be ready in under an hour. The trade-off is that Buildroot offers less flexibility for large-scale product lines with multiple hardware variants and long-term maintenance. For a dedicated sensor node or single-purpose embedded device, Buildroot is an excellent fit.
+
+| Feature | Buildroot | Yocto |
+|---------|-----------|-------|
+| Learning curve | Low (Kconfig menus) | Steep (BitBake, layers, recipes) |
+| First build time | 20 to 40 minutes | 1 to 3 hours |
+| Package count | ~2,800 | ~10,000+ (via layers) |
+| Output | Single image | Image + SDK + package feeds |
+| Best for | Single-purpose devices | Complex product families |
+
+## Downloading and Initial Configuration
+
+<InArticleAd />
+
+
+<Steps>
+
+1. **Clone Buildroot**
+
+   ```bash
+   cd ~
+   git clone https://git.buildroot.net/buildroot
+   cd buildroot
+   git checkout 2024.02  # Use a stable release tag
+   ```
+
+2. **Load the default configuration for Raspberry Pi Zero 2 W**
+
+   Buildroot ships with default configurations for many boards. The Pi Zero 2 W uses the AArch64 configuration:
+
+   ```bash
+   make raspberrypi0_2w_defconfig
+   ```
+
+   This creates a `.config` file with sensible defaults: AArch64 target, internal toolchain, Linux kernel from the Raspberry Pi fork, and a minimal root filesystem.
+
+3. **Open the configuration menu**
+
+   ```bash
+   make menuconfig
+   ```
+
+   The menu is organized into major sections:
+
+   | Menu Section | What It Controls |
+   |-------------|------------------|
+   | Target options | CPU architecture, ABI, floating point |
+   | Toolchain | Compiler version, C library (glibc/musl/uclibc) |
+   | System configuration | Hostname, init system, root password, overlays |
+   | Kernel | Source, version, defconfig, device tree |
+   | Target packages | All user-space packages |
+   | Filesystem images | ext4, squashfs, SD card image layout |
+   | Bootloader | U-Boot or direct kernel boot |
+
+</Steps>
+
+## Key Configuration Options
+
+<InArticleAd />
+
+
+Navigate through menuconfig and set the following options. You can also edit the `.config` file directly, but menuconfig handles dependencies automatically.
+
+<Tabs>
+  <TabItem label="Target Options">
+    ```
+    Target options --->
+        Target Architecture: AArch64 (little endian)
+        Target Architecture Variant: cortex-A53
+    ```
+
+    The BCM2710A1 on the Pi Zero 2 W has four Cortex-A53 cores. Selecting the correct variant enables compiler optimizations specific to this core.
+  </TabItem>
+  <TabItem label="Toolchain">
+    ```
+    Toolchain --->
+        Toolchain type: Buildroot toolchain (internal)
+        C library: glibc
+        [*] Enable C++ support
+        GCC compiler Version: gcc 13.x
+    ```
+
+    The internal toolchain is built from source as part of the Buildroot process. This ensures binary compatibility. For faster builds on repeated iterations, you can switch to an external pre-built toolchain like Linaro, but the internal option is simplest for getting started.
+  </TabItem>
+  <TabItem label="System Configuration">
+    ```
+    System configuration --->
+        System hostname: siliconwit-sensor
+        System banner: Welcome to SiliconWit Sensor Node
+        Init system: BusyBox
+        /dev management: Dynamic using devtmpfs only
+        Root password: siliconwit
+        Root filesystem overlay directories: board/siliconwit/rpi0w2/rootfs_overlay
+    ```
+
+    BusyBox init is minimal and fast. It reads `/etc/inittab` at boot. devtmpfs lets the kernel create device nodes automatically without needing udev or mdev.
+  </TabItem>
+  <TabItem label="Kernel">
+    ```
+    Kernel --->
+        [*] Linux Kernel
+        Kernel version: Custom Git repository
+        URL of custom repository: https://github.com/raspberrypi/linux
+        Custom repository version: rpi-6.6.y
+        Defconfig name: bcm2711
+        [*] Build a Device Tree Blob (DTB)
+        Device Tree Source file names: broadcom/bcm2710-rpi-zero-2-w
+    ```
+
+    If you have a custom kernel configuration from Lesson 2, you can use "Using a custom config file" instead of a defconfig and point it to your saved `.config`.
+  </TabItem>
+  <TabItem label="Filesystem">
+    ```
+    Filesystem images --->
+        [*] ext2/3/4 root filesystem
+            ext2/3/4 variant: ext4
+            exact size: 64M
+        [*] Create a GPT partition table image
+            Partition table type: hybrid (GPT + MBR)
+    ```
+
+    A 64 MB root filesystem is generous for a minimal image. The final SD card image will include the boot partition (FAT32 with kernel and DTB) and the root partition (ext4).
+  </TabItem>
+</Tabs>
+
+## Adding Standard Packages
+
+<InArticleAd />
+
+
+Packages are selected under `Target packages` in menuconfig. Each package has a `BR2_PACKAGE_*` Kconfig variable. Some packages pull in dependencies automatically.
+
+Add I2C tools for debugging sensor communication:
+
+```
+Target packages --->
+    Hardware handling --->
+        [*] i2c-tools
+```
+
+Add Dropbear for lightweight SSH access during development:
+
+```
+Target packages --->
+    Networking applications --->
+        [*] dropbear
+```
+
+You can also enable packages directly in the config file:
+
+```bash
+# Append to .config (or use menuconfig)
+echo "BR2_PACKAGE_I2C_TOOLS=y" >> .config
+echo "BR2_PACKAGE_DROPBEAR=y" >> .config
+make olddefconfig  # Resolve dependencies
+```
+
+`make olddefconfig` applies the new settings and resolves any dependencies (for example, Dropbear requires the `zlib` library, which will be selected automatically).
+
+## Creating a Custom Package
+
+<InArticleAd />
+
+
+Buildroot packages follow a strict directory and naming convention. You will create a `sensor-monitor` package that builds the BME280 sensor reader from earlier lessons.
+
+<FileTree>
+- buildroot/
+  - package/
+    - sensor-monitor/
+      - Config.in
+      - sensor-monitor.mk
+      - src/
+        - sensor-monitor.c
+        - Makefile
+</FileTree>
+
+<Steps>
+
+1. **Create the package directory**
+
+   ```bash
+   mkdir -p package/sensor-monitor/src
+   ```
+
+2. **Write Config.in**
+
+   This file defines the package in Buildroot's Kconfig system:
+
+   ```bash title="package/sensor-monitor/Config.in"
+   config BR2_PACKAGE_SENSOR_MONITOR
+       bool "sensor-monitor"
+       help
+         BME280 sensor monitoring application.
+         Reads temperature, humidity, and pressure via I2C
+         and logs to stdout or a file.
+   ```
+
+3. **Write the Buildroot package recipe**
+
+   The `.mk` file tells Buildroot how to fetch, build, and install your package:
+
+   ```makefile title="package/sensor-monitor/sensor-monitor.mk"
+   ################################################################################
+   #
+   # sensor-monitor
+   #
+   ################################################################################
+
+   SENSOR_MONITOR_VERSION = 1.0
+   SENSOR_MONITOR_SITE = $(SENSOR_MONITOR_PKGDIR)/src
+   SENSOR_MONITOR_SITE_METHOD = local
+   SENSOR_MONITOR_LICENSE = MIT
+
+   define SENSOR_MONITOR_BUILD_CMDS
+   	$(TARGET_MAKE_ENV) $(MAKE) $(TARGET_CONFIGURE_OPTS) \
+   		-C $(@D) all
+   endef
+
+   define SENSOR_MONITOR_INSTALL_TARGET_CMDS
+   	$(INSTALL) -D -m 0755 $(@D)/sensor-monitor \
+   		$(TARGET_DIR)/usr/bin/sensor-monitor
+   endef
+
+   $(eval $(generic-package))
+   ```
+
+   Key points about this recipe:
+   - `SENSOR_MONITOR_SITE_METHOD = local` means the source is in the Buildroot tree (not fetched from the internet).
+   - `SENSOR_MONITOR_SITE` points to the `src/` directory.
+   - `TARGET_MAKE_ENV` and `TARGET_CONFIGURE_OPTS` inject the cross-compiler and flags.
+   - `$(eval $(generic-package))` registers this as a Buildroot package.
+
+4. **Write the application source**
+
+   ```c title="package/sensor-monitor/src/sensor-monitor.c"
+   #include <stdio.h>
+   #include <stdlib.h>
+   #include <fcntl.h>
+   #include <unistd.h>
+   #include <sys/ioctl.h>
+   #include <linux/i2c-dev.h>
+   #include <stdint.h>
+   #include <time.h>
+   #include <signal.h>
+
+   #define BME280_ADDR      0x76
+   #define BME280_CHIP_ID   0x60
+   #define BME280_REG_ID    0xD0
+   #define BME280_REG_CTRL_HUM   0xF2
+   #define BME280_REG_CTRL_MEAS  0xF4
+   #define BME280_REG_CONFIG     0xF5
+   #define BME280_REG_DATA       0xF7
+   #define BME280_REG_CALIB00    0x88
+   #define BME280_REG_CALIB26    0xE1
+
+   static volatile int running = 1;
+
+   static void signal_handler(int sig)
+   {
+       (void)sig;
+       running = 0;
+   }
+
+   static int i2c_write_byte(int fd, uint8_t reg, uint8_t val)
+   {
+       uint8_t buf[2] = { reg, val };
+       if (write(fd, buf, 2) != 2)
+           return -1;
+       return 0;
+   }
+
+   static int i2c_read_bytes(int fd, uint8_t reg, uint8_t *buf, int len)
+   {
+       if (write(fd, &reg, 1) != 1)
+           return -1;
+       if (read(fd, buf, len) != len)
+           return -1;
+       return 0;
+   }
+
+   /* BME280 compensation formulas (from datasheet) */
+   struct bme280_calib {
+       uint16_t dig_T1;
+       int16_t  dig_T2, dig_T3;
+       uint16_t dig_P1;
+       int16_t  dig_P2, dig_P3, dig_P4, dig_P5;
+       int16_t  dig_P6, dig_P7, dig_P8, dig_P9;
+       uint8_t  dig_H1, dig_H3;
+       int16_t  dig_H2, dig_H4, dig_H5;
+       int8_t   dig_H6;
+   };
+
+   static int read_calibration(int fd, struct bme280_calib *cal)
+   {
+       uint8_t buf[26];
+       uint8_t buf2[7];
+
+       if (i2c_read_bytes(fd, BME280_REG_CALIB00, buf, 26) < 0)
+           return -1;
+
+       cal->dig_T1 = (uint16_t)(buf[1] << 8 | buf[0]);
+       cal->dig_T2 = (int16_t)(buf[3] << 8 | buf[2]);
+       cal->dig_T3 = (int16_t)(buf[5] << 8 | buf[4]);
+       cal->dig_P1 = (uint16_t)(buf[7] << 8 | buf[6]);
+       cal->dig_P2 = (int16_t)(buf[9] << 8 | buf[8]);
+       cal->dig_P3 = (int16_t)(buf[11] << 8 | buf[10]);
+       cal->dig_P4 = (int16_t)(buf[13] << 8 | buf[12]);
+       cal->dig_P5 = (int16_t)(buf[15] << 8 | buf[14]);
+       cal->dig_P6 = (int16_t)(buf[17] << 8 | buf[16]);
+       cal->dig_P7 = (int16_t)(buf[19] << 8 | buf[18]);
+       cal->dig_P8 = (int16_t)(buf[21] << 8 | buf[20]);
+       cal->dig_P9 = (int16_t)(buf[23] << 8 | buf[22]);
+
+       cal->dig_H1 = buf[25];
+
+       if (i2c_read_bytes(fd, BME280_REG_CALIB26, buf2, 7) < 0)
+           return -1;
+
+       cal->dig_H2 = (int16_t)(buf2[1] << 8 | buf2[0]);
+       cal->dig_H3 = buf2[2];
+       cal->dig_H4 = (int16_t)((buf2[3] << 4) | (buf2[4] & 0x0F));
+       cal->dig_H5 = (int16_t)((buf2[5] << 4) | (buf2[4] >> 4));
+       cal->dig_H6 = (int8_t)buf2[6];
+
+       return 0;
+   }
+
+   static int32_t t_fine;
+
+   static double compensate_temperature(int32_t adc_T, struct bme280_calib *cal)
+   {
+       double var1, var2, T;
+       var1 = ((double)adc_T / 16384.0 - (double)cal->dig_T1 / 1024.0)
+              * (double)cal->dig_T2;
+       var2 = (((double)adc_T / 131072.0 - (double)cal->dig_T1 / 8192.0)
+              * ((double)adc_T / 131072.0 - (double)cal->dig_T1 / 8192.0))
+              * (double)cal->dig_T3;
+       t_fine = (int32_t)(var1 + var2);
+       T = (var1 + var2) / 5120.0;
+       return T;
+   }
+
+   static double compensate_pressure(int32_t adc_P, struct bme280_calib *cal)
+   {
+       double var1, var2, p;
+       var1 = ((double)t_fine / 2.0) - 64000.0;
+       var2 = var1 * var1 * (double)cal->dig_P6 / 32768.0;
+       var2 = var2 + var1 * (double)cal->dig_P5 * 2.0;
+       var2 = (var2 / 4.0) + ((double)cal->dig_P4 * 65536.0);
+       var1 = ((double)cal->dig_P3 * var1 * var1 / 524288.0
+              + (double)cal->dig_P2 * var1) / 524288.0;
+       var1 = (1.0 + var1 / 32768.0) * (double)cal->dig_P1;
+       if (var1 == 0.0)
+           return 0;
+       p = 1048576.0 - (double)adc_P;
+       p = (p - (var2 / 4096.0)) * 6250.0 / var1;
+       var1 = (double)cal->dig_P9 * p * p / 2147483648.0;
+       var2 = p * (double)cal->dig_P8 / 32768.0;
+       p = p + (var1 + var2 + (double)cal->dig_P7) / 16.0;
+       return p / 100.0;  /* hPa */
+   }
+
+   static double compensate_humidity(int32_t adc_H, struct bme280_calib *cal)
+   {
+       double h;
+       h = ((double)t_fine) - 76800.0;
+       if (h == 0.0)
+           return 0;
+       h = (adc_H - ((double)cal->dig_H4 * 64.0
+           + ((double)cal->dig_H5 / 16384.0) * h))
+           * ((double)cal->dig_H2 / 65536.0
+           * (1.0 + (double)cal->dig_H6 / 67108864.0 * h
+           * (1.0 + (double)cal->dig_H3 / 67108864.0 * h)));
+       h = h * (1.0 - (double)cal->dig_H1 * h / 524288.0);
+       if (h > 100.0) h = 100.0;
+       if (h < 0.0) h = 0.0;
+       return h;
+   }
+
+   int main(int argc, char *argv[])
+   {
+       const char *i2c_dev = "/dev/i2c-1";
+       int interval_sec = 5;
+       int fd;
+       uint8_t chip_id;
+       struct bme280_calib cal;
+       uint8_t data[8];
+       int32_t adc_T, adc_P, adc_H;
+
+       if (argc > 1)
+           interval_sec = atoi(argv[1]);
+       if (interval_sec < 1)
+           interval_sec = 1;
+
+       signal(SIGINT, signal_handler);
+       signal(SIGTERM, signal_handler);
+
+       fd = open(i2c_dev, O_RDWR);
+       if (fd < 0) {
+           perror("open i2c");
+           return 1;
+       }
+
+       if (ioctl(fd, 0x0703 /* I2C_SLAVE */, BME280_ADDR) < 0) {
+           perror("ioctl I2C_SLAVE");
+           close(fd);
+           return 1;
+       }
+
+       /* Verify chip ID */
+       if (i2c_read_bytes(fd, BME280_REG_ID, &chip_id, 1) < 0) {
+           fprintf(stderr, "Failed to read chip ID\n");
+           close(fd);
+           return 1;
+       }
+       if (chip_id != BME280_CHIP_ID) {
+           fprintf(stderr, "Unexpected chip ID: 0x%02X\n", chip_id);
+           close(fd);
+           return 1;
+       }
+
+       /* Read calibration data */
+       if (read_calibration(fd, &cal) < 0) {
+           fprintf(stderr, "Failed to read calibration\n");
+           close(fd);
+           return 1;
+       }
+
+       /* Configure: 1x oversampling for all, normal mode */
+       i2c_write_byte(fd, BME280_REG_CTRL_HUM, 0x01);
+       i2c_write_byte(fd, BME280_REG_CONFIG, 0xA0);   /* 1000ms standby */
+       i2c_write_byte(fd, BME280_REG_CTRL_MEAS, 0x27); /* T:1x, P:1x, normal */
+
+       printf("timestamp,temperature_c,pressure_hpa,humidity_pct\n");
+
+       while (running) {
+           sleep(interval_sec);
+
+           if (i2c_read_bytes(fd, BME280_REG_DATA, data, 8) < 0) {
+               fprintf(stderr, "Read error\n");
+               continue;
+           }
+
+           adc_P = (int32_t)((data[0] << 12) | (data[1] << 4) | (data[2] >> 4));
+           adc_T = (int32_t)((data[3] << 12) | (data[4] << 4) | (data[5] >> 4));
+           adc_H = (int32_t)((data[6] << 8) | data[7]);
+
+           double temp = compensate_temperature(adc_T, &cal);
+           double pres = compensate_pressure(adc_P, &cal);
+           double hum  = compensate_humidity(adc_H, &cal);
+
+           time_t now = time(NULL);
+           printf("%ld,%.2f,%.2f,%.2f\n", (long)now, temp, pres, hum);
+           fflush(stdout);
+       }
+
+       close(fd);
+       printf("Shutting down.\n");
+       return 0;
+   }
+   ```
+
+5. **Write the application Makefile**
+
+   ```makefile title="package/sensor-monitor/src/Makefile"
+   CC ?= gcc
+   CFLAGS ?= -Wall -O2
+
+   all: sensor-monitor
+
+   sensor-monitor: sensor-monitor.c
+   	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $< -lm
+
+   clean:
+   	rm -f sensor-monitor
+   ```
+
+6. **Register the package with Buildroot**
+
+   Add your package to Buildroot's package Config.in so menuconfig can find it:
+
+   ```bash
+   echo 'source "package/sensor-monitor/Config.in"' >> package/Config.in
+   ```
+
+   Then enable it:
+
+   ```bash
+   make menuconfig
+   # Navigate to: Target packages --> sensor-monitor
+   # Enable it with [*]
+   ```
+
+   Or directly:
+
+   ```bash
+   echo "BR2_PACKAGE_SENSOR_MONITOR=y" >> .config
+   make olddefconfig
+   ```
+
+</Steps>
+
+## Filesystem Overlays
+
+<InArticleAd />
+
+
+A filesystem overlay is a directory tree that gets copied on top of the generated root filesystem. Any files you place in the overlay appear in the final image at the corresponding path. This is how you add custom configuration files, init scripts, and application settings without modifying Buildroot packages.
+
+Create the overlay directory structure:
+
+```bash
+mkdir -p board/siliconwit/rpi0w2/rootfs_overlay/etc/init.d
+mkdir -p board/siliconwit/rpi0w2/rootfs_overlay/etc/sensor-monitor
+```
+
+<FileTree>
+- board/
+  - siliconwit/
+    - rpi0w2/
+      - rootfs_overlay/
+        - etc/
+          - inittab
+          - init.d/
+            - S99sensor
+          - sensor-monitor/
+            - config.conf
+</FileTree>
+
+**Custom inittab** (controls what BusyBox init starts at boot):
+
+```bash title="board/siliconwit/rpi0w2/rootfs_overlay/etc/inittab"
+# System initialization
+::sysinit:/bin/mount -t proc proc /proc
+::sysinit:/bin/mount -o remount,rw /
+::sysinit:/bin/mkdir -p /dev/pts /dev/shm
+::sysinit:/bin/mount -a
+::sysinit:/sbin/swapon -a
+null::sysinit:/bin/ln -sf /proc/self/fd /dev/fd
+null::sysinit:/bin/ln -sf /proc/self/fd/0 /dev/stdin
+null::sysinit:/bin/ln -sf /proc/self/fd/1 /dev/stdout
+null::sysinit:/bin/ln -sf /proc/self/fd/2 /dev/stderr
+::sysinit:/bin/hostname -F /etc/hostname
+
+# Run all startup scripts
+::sysinit:/etc/init.d/rcS
+
+# Serial console
+ttyAMA0::respawn:/sbin/getty -L ttyAMA0 115200 vt100
+
+# Graceful shutdown
+::shutdown:/etc/init.d/rcK
+::shutdown:/sbin/swapoff -a
+::shutdown:/bin/umount -a -r
+```
+
+**Init script for the sensor application:**
+
+```bash title="board/siliconwit/rpi0w2/rootfs_overlay/etc/init.d/S99sensor"
+#!/bin/sh
+
+DAEMON=/usr/bin/sensor-monitor
+PIDFILE=/var/run/sensor-monitor.pid
+LOGFILE=/var/log/sensor-monitor.csv
+INTERVAL=10
+
+case "$1" in
+    start)
+        printf "Starting sensor-monitor: "
+        start-stop-daemon -S -b -m -p "$PIDFILE" \
+            -x "$DAEMON" -- "$INTERVAL" > "$LOGFILE" 2>&1
+        echo "OK"
+        ;;
+    stop)
+        printf "Stopping sensor-monitor: "
+        start-stop-daemon -K -p "$PIDFILE"
+        rm -f "$PIDFILE"
+        echo "OK"
+        ;;
+    restart)
+        $0 stop
+        sleep 1
+        $0 start
+        ;;
+    *)
+        echo "Usage: $0 {start|stop|restart}"
+        exit 1
+        ;;
+esac
+```
+
+Make the init script executable:
+
+```bash
+chmod +x board/siliconwit/rpi0w2/rootfs_overlay/etc/init.d/S99sensor
+```
+
+**Application configuration:**
+
+```ini title="board/siliconwit/rpi0w2/rootfs_overlay/etc/sensor-monitor/config.conf"
+# Sensor monitor configuration
+i2c_bus=/dev/i2c-1
+interval_seconds=10
+log_file=/var/log/sensor-monitor.csv
+```
+
+The overlay path must match what you set in `System configuration --> Root filesystem overlay directories`. Buildroot copies the entire overlay tree using `rsync` during the final filesystem assembly step.
+
+## Building the Image
+
+<InArticleAd />
+
+
+With everything configured, build the complete image:
+
+```bash
+make 2>&1 | tee build.log
+```
+
+The build proceeds through these stages:
+
+| Stage | What Happens | Duration |
+|-------|-------------|----------|
+| Toolchain | Downloads and builds GCC, binutils, glibc | 5 to 10 min |
+| Host utilities | Builds tools needed on the host (fakeroot, mkfs) | 1 to 2 min |
+| Packages | Builds BusyBox, dropbear, i2c-tools, sensor-monitor | 2 to 5 min |
+| Kernel | Builds the Linux kernel and device tree | 5 to 15 min |
+| Root filesystem | Assembles ext4 image, applies overlay | Under 1 min |
+| SD card image | Combines boot and root partitions | Under 1 min |
+
+Total build time on a modern 8-core x86_64 host is typically 20 to 40 minutes for the first build. You can speed it up with parallel jobs:
+
+```bash
+make -j$(nproc) 2>&1 | tee build.log
+```
+
+After the build completes, the output images are in `output/images/`:
+
+```bash
+ls -lh output/images/
+```
+
+Expected output:
+
+```
+-rw-r--r-- 1 user user  5.3M  sdcard.img.boot.vfat
+-rw-r--r-- 1 user user  6.2M  Image
+-rw-r--r-- 1 user user   15K  bcm2710-rpi-zero-2-w.dtb
+-rw-r--r-- 1 user user   64M  rootfs.ext4
+-rw-r--r-- 1 user user   72M  sdcard.img
+```
+
+The `sdcard.img` file is the complete, ready-to-flash image. The `rootfs.ext4` is just the root partition if you need to flash it separately.
+
+## Flashing and Testing
+
+<InArticleAd />
+
+
+<Steps>
+
+1. **Write the image to an SD card**
+
+   On Linux:
+
+   ```bash
+   # Identify your SD card device (be careful, wrong device = data loss)
+   lsblk
+
+   # Write the image (replace /dev/sdX with your SD card)
+   sudo dd if=output/images/sdcard.img of=/dev/sdX bs=4M status=progress
+   sync
+   ```
+
+   On macOS:
+
+   ```bash
+   diskutil list
+   diskutil unmountDisk /dev/diskN
+   sudo dd if=output/images/sdcard.img of=/dev/rdiskN bs=4m
+   ```
+
+   Alternatively, use balenaEtcher for a graphical flashing tool.
+
+2. **Connect the serial console**
+
+   Attach a USB-to-serial adapter to the Pi's UART pins (GPIO14 TX, GPIO15 RX, GND). Open a terminal:
+
+   ```bash
+   picocom -b 115200 /dev/ttyUSB0
+   ```
+
+3. **Boot and log in**
+
+   Insert the SD card and power on. You should see kernel boot messages on the serial console. Login with:
+
+   ```
+   siliconwit-sensor login: root
+   Password: siliconwit
+   ```
+
+4. **Verify the sensor application is running**
+
+   ```bash
+   ps | grep sensor
+   ```
+
+   You should see the `sensor-monitor` process. Check the log:
+
+   ```bash
+   cat /var/log/sensor-monitor.csv
+   ```
+
+   Expected output:
+
+   ```
+   timestamp,temperature_c,pressure_hpa,humidity_pct
+   1709125200,23.45,1013.25,45.67
+   1709125210,23.47,1013.24,45.70
+   ```
+
+5. **Check the image size**
+
+   ```bash
+   df -h
+   ```
+
+   The root filesystem should show well under 32 MB of used space.
+
+6. **Verify only essential services are running**
+
+   ```bash
+   ps
+   ```
+
+   You should see only: init, a few kernel threads, getty (serial console), dropbear (if enabled), and sensor-monitor. No desktop, no systemd, no unnecessary services.
+
+</Steps>
+
+## Read-Only Root Filesystem
+
+<InArticleAd />
+
+
+For production embedded systems, mounting the root filesystem as read-only dramatically improves reliability. SD cards wear out from repeated writes, and a read-only root prevents filesystem corruption from unexpected power loss.
+
+Configure Buildroot for a read-only root:
+
+```
+System configuration --->
+    [*] remount root filesystem read-only at boot
+```
+
+You also need writable areas for runtime data. Add tmpfs mounts in your overlay's `/etc/fstab`:
+
+```bash title="board/siliconwit/rpi0w2/rootfs_overlay/etc/fstab"
+# <device>     <mount>   <type>  <options>         <dump> <pass>
+/dev/mmcblk0p1 /boot     vfat    ro                0      0
+/dev/mmcblk0p2 /         ext4    ro,noatime        0      1
+tmpfs          /tmp      tmpfs   nosuid,nodev      0      0
+tmpfs          /var/log  tmpfs   nosuid,nodev      0      0
+tmpfs          /var/run  tmpfs   nosuid,nodev      0      0
+```
+
+With this setup:
+
+- The root filesystem (`/`) and boot partition (`/boot`) are mounted read-only.
+- `/tmp`, `/var/log`, and `/var/run` are tmpfs (RAM-based). Data written here is lost on reboot, which is acceptable for logs and PID files.
+- The SD card receives zero writes during normal operation, extending its lifespan by orders of magnitude.
+- If power is cut at any point, the filesystem is always consistent because nothing was being written to it.
+
+If the sensor application needs to persist data across reboots, you have two options: add a small writable data partition on the SD card, or use an external storage device.
+
+## Rebuilding and Iterating
+
+<InArticleAd />
+
+
+One of Buildroot's strengths is fast incremental rebuilds. You do not need to rebuild everything when you change one package.
+
+**Rebuild a single package:**
+
+```bash
+# Rebuild only the sensor-monitor package
+make sensor-monitor-rebuild
+
+# Then regenerate the filesystem image
+make
+```
+
+**Rebuild the kernel (after changing kernel config):**
+
+```bash
+make linux-menuconfig   # Modify kernel config
+make linux-rebuild      # Rebuild just the kernel
+make                    # Regenerate images
+```
+
+**Full clean rebuild (when changing toolchain or major config):**
+
+```bash
+make clean
+make -j$(nproc)
+```
+
+**Save your configuration:**
+
+```bash
+# Save Buildroot config to a defconfig file
+make savedefconfig BR2_DEFCONFIG=configs/siliconwit_rpi0w2_defconfig
+```
+
+This creates a minimal defconfig that you can version-control. To restore it later:
+
+```bash
+make siliconwit_rpi0w2_defconfig
+```
+
+**Useful make targets for debugging:**
+
+| Command | Purpose |
+|---------|---------|
+| `make sensor-monitor-rebuild` | Rebuild one package |
+| `make sensor-monitor-dirclean` | Delete package build directory entirely |
+| `make linux-menuconfig` | Edit kernel config from within Buildroot |
+| `make busybox-menuconfig` | Edit BusyBox config (select which utilities to include) |
+| `make graph-depends` | Generate a dependency graph (requires Graphviz) |
+| `make graph-size` | Generate a size breakdown of the image |
+| `make sdk` | Build a relocatable SDK for external development |
+| `make source` | Download all source tarballs (for offline builds) |
+
+## Exercises
+
+<InArticleAd />
+
+
+<CardGrid>
+  <Card title="Exercise 1: Add a Web Dashboard" icon="pencil">
+    Enable the `lighttpd` web server package in Buildroot. Create a simple HTML page in your filesystem overlay at `/var/www/index.html` that displays "Sensor Dashboard." Write a CGI script in `/var/www/cgi-bin/data.sh` that reads the sensor log CSV and returns the last 10 readings as JSON. Verify you can access the dashboard from a browser on the same network.
+  </Card>
+  <Card title="Exercise 2: Minimize Image Size" icon="pencil">
+    Start with your working image and reduce its size as much as possible. Disable dropbear (no SSH). Use musl instead of glibc (it is much smaller). Run `make graph-size` and identify the largest components. Strip all binaries with `BR2_STRIP_strip=y`. Use `BR2_OPTIMIZE_S=y` for size-optimized compilation. Target: get the root filesystem under 8 MB.
+  </Card>
+  <Card title="Exercise 3: Add the Kernel Module" icon="pencil">
+    Create a second custom Buildroot package called `mydevice-driver` that builds the kernel module from Lesson 5. Use `$(LINUX_DIR)` in your `.mk` file as the KERNELDIR. Install the `.ko` file to `/lib/modules/$(LINUX_VERSION_PROBED)/extra/`. Add an init script that runs `insmod` at boot. Verify with `lsmod` after booting the image.
+  </Card>
+  <Card title="Exercise 4: Dual Partition OTA Updates" icon="pencil">
+    Modify the SD card partition layout to have two root partitions (A and B). Write a shell script that downloads a new `rootfs.ext4` image, writes it to the inactive partition, updates the boot configuration to point to the new partition, and reboots. This is a basic over-the-air update mechanism. Test by making a visible change (such as the hostname) and performing an update.
+  </Card>
+</CardGrid>
+
+<EmbeddedLinuxRpiComments />
+
+
+
+<InArticleAd />
+<TawkWidget />
+<Copyright />

@@ -1,0 +1,2048 @@
+---
+title: "Edge Gateway for MCU Sensor Networks"
+description: "Build a complete edge gateway on the Raspberry Pi Zero 2 W that receives MQTT data from ESP32 and Pico sensor nodes, stores readings in SQLite, serves a live web dashboard, captures USB webcam snapshots, and forwards data to the cloud. The capstone project that ties together all six embedded courses."
+contributors: "sam-macharia,lawrence-langat"
+pubDate: 2026-03-12
+tags: ["embedded-linux", "iot", "mqtt", "gateway", "sqlite", "dashboard", "raspberry-pi", "capstone"]
+excerpt: "Combine everything from this course and the entire embedded series into a production edge gateway. The Raspberry Pi receives sensor data from MCU nodes, stores it in SQLite, serves a web dashboard, captures USB camera images, and forwards data to the cloud. This project does things microcontrollers cannot handle and does them more reliably than stock Raspberry Pi OS ever could."
+heroImage: "https://cdn.siliconwit.com/education/embedded-linux-rpi/edge-gateway-mcu-sensor-network.png"
+---
+
+import TawkWidget from '../../../../components/TawkWidget.astro';
+import UniversalContentContributors from '../../../../components/UniversalContentContributors.astro';
+import InArticleAd from '../../../../components/InArticleAd.astro';
+import Copyright from '../../../../components/Copyright.astro';
+import BionicText from '../../../../components/BionicText.astro';
+import TailwindWrapper from '../../../../components/TailwindWrapper.jsx';
+import { Tabs, TabItem } from '@astrojs/starlight/components';
+import { Card, CardGrid, Badge, Steps, LinkButton, FileTree } from '@astrojs/starlight/components';
+
+<UniversalContentContributors 
+  contributors={frontmatter.contributors}
+/>
+
+
+
+import EmbeddedLinuxRpiComments from '../../../../components/embedded-linux-rpi/EmbeddedLinuxRpiComments.astro';
+
+The previous eight lessons taught you to cross-compile, build custom kernels, write device trees, develop kernel modules, create Buildroot and Yocto images, and manage system services. In this final lesson, you combine all of those skills into a single deployable product: an edge gateway that collects sensor data from the MCU nodes you built in the ESP32, RPi Pico, and STM32 courses, stores it locally, serves a live dashboard, and forwards selected data to the cloud. This project does things that microcontrollers cannot handle and does them more reliably than stock Raspberry Pi OS ever could in a deployed environment. #EdgeGateway #EmbeddedLinux #IoT
+
+## What We Are Building
+
+<Card title="Edge Gateway: RPi Zero 2 W as MCU Network Hub" icon="star">
+A complete edge gateway running on a custom Yocto image for the Raspberry Pi Zero 2 W. The gateway runs a Mosquitto MQTT broker that receives sensor data from ESP32 and RPi Pico nodes over Wi-Fi. Incoming readings are stored in a SQLite database (capable of holding months of history). A Python Flask web server provides live charts via Chart.js. A USB webcam capture service takes snapshots when sensor thresholds are exceeded. An MQTT bridge forwards aggregated data to a cloud broker. All services are managed by systemd with watchdog recovery.
+</Card>
+
+**System specifications:**
+
+| Parameter | Value |
+|-----------|-------|
+| Gateway hardware | Raspberry Pi Zero 2 W (BCM2710A1, Cortex-A53, AArch64) |
+| Base image | Custom Yocto (Scarthgap) from Lesson 8's meta-siliconwit-rpi |
+| MQTT broker | Mosquitto 2.x |
+| Database | SQLite 3 |
+| Web framework | Python Flask + Chart.js |
+| Camera | USB webcam via fswebcam / v4l2 |
+| Cloud forwarding | MQTT bridge (mosquitto-bridge) + REST API |
+| Service manager | systemd with watchdog |
+| Sensor nodes | ESP32 (Lesson series), RPi Pico (Lesson series), STM32 (Lesson series) |
+| Protocol | MQTT v3.1.1 over Wi-Fi |
+
+### Services Overview
+
+| Service | Port | Description |
+|---------|------|-------------|
+| mosquitto | 1883 | MQTT broker accepting sensor node connections |
+| gateway-datalogger | (internal) | Subscribes to MQTT topics, writes to SQLite, triggers camera |
+| gateway-dashboard | 5000 | Flask web server with live charts and REST API |
+| gateway-camera | (triggered) | Captures JPEG snapshots on threshold events |
+| mosquitto-bridge | (outbound) | Forwards selected topics to cloud broker |
+
+## Why This Cannot Run on a Microcontroller
+
+<InArticleAd />
+
+
+The ESP32, STM32, and RPi Pico are excellent sensor nodes, but they cannot serve as a full gateway. Here is a concrete comparison of what this gateway does versus what a microcontroller can realistically handle:
+
+| Capability | RPi Zero 2 W Gateway | Typical MCU (ESP32/STM32/Pico) |
+|-----------|----------------------|-------------------------------|
+| SQLite database (months of data) | Yes, filesystem + 512 MB RAM | No filesystem or RAM for SQL engine |
+| HTTP server with HTML templating | Flask with Jinja2, Chart.js | Basic HTTP possible, no templating engine |
+| USB webcam capture | USB host + v4l2 + fswebcam | No USB host stack, no camera drivers |
+| Run multiple isolated services | systemd process isolation | Single firmware, no process isolation |
+| SSH remote access | Full OpenSSH server | No SSH, only serial or basic telnet |
+| Python runtime | CPython 3.x with pip packages | MicroPython (limited), no pip |
+| Log rotation and storage | journald + logrotate on ext4 | Limited flash, no log rotation |
+| OTA with rollback | A/B root partitions (Lesson 8) | Basic OTA, risky rollback |
+| TLS certificate management | OpenSSL with full cert store | Minimal TLS, limited cert storage |
+
+The RPi Zero 2 W sits at the boundary between microcontrollers and full servers. It has enough resources to run Linux with real services, but it draws under 1 W at idle, costs under 20 USD, and fits in the same enclosures as an MCU board.
+
+## Why Not Just Use Raspberry Pi OS?
+
+<InArticleAd />
+
+
+You could install Raspberry Pi OS, `apt install mosquitto python3-flask`, and build this gateway in an afternoon. So why spend eight lessons learning to build a custom image? Because Raspberry Pi OS fails in every way that matters for a deployed product:
+
+<CardGrid>
+  <Card title="Power Loss Corruption" icon="warning">
+    Raspberry Pi OS writes to the SD card continuously (logs, swap, temp files). When power cuts unexpectedly (common in industrial, agricultural, and remote deployments), the ext4 filesystem often corrupts. Your gateway is now bricked until someone physically re-flashes the card. Our custom image uses a **read-only root filesystem** that cannot corrupt, no matter when power is lost.
+  </Card>
+
+  <Card title="30-Second Boot vs 4-Second Boot" icon="warning">
+    Raspberry Pi OS takes 25 to 40 seconds to boot. During a power blip in a greenhouse, factory, or server room, your monitoring is blind for half a minute. Our custom kernel (Lesson 2) boots in under 4 seconds. Sensor data resumes almost immediately.
+  </Card>
+
+  <Card title="2 to 4 GB Image vs 32 MB Image" icon="warning">
+    Need to deploy 50 gateways? With Raspberry Pi OS, you are cloning a 2 to 4 GB image per device (Lite to Desktop), manually configuring each one, and hoping nothing drifts. Our Yocto image is 32 MB, built from version-controlled metadata, byte-for-byte identical every build, and deployable via OTA.
+  </Card>
+
+  <Card title="No OTA, No Rollback" icon="warning">
+    Raspberry Pi OS has no built-in over-the-air update mechanism. Running `apt upgrade` on a remote device can break things with no way back. Our A/B root partition layout (Lesson 8) writes updates to the inactive partition, switches on reboot, and automatically rolls back if the new image fails to boot.
+  </Card>
+</CardGrid>
+
+| Scenario | Raspberry Pi OS | Custom Embedded Linux (This Course) |
+|----------|----------------|-------------------------------------|
+| Sudden power loss | SD card corruption risk | Read-only root, always safe |
+| Boot time after power cut | 25 to 40 seconds | Under 4 seconds |
+| Deploy 50 identical devices | Manual setup each | One Yocto image, reproducible |
+| Remote firmware update | apt upgrade (risky, no rollback) | A/B OTA with automatic rollback |
+| Attack surface | 1,500+ packages, package manager | Only your services, no package manager |
+| License compliance for shipping | Unknown, unaudited | Yocto generates full license manifest |
+| Disk image size | 2 to 4 GB | 32 MB |
+| RAM at idle | 200+ MB (desktop, services) | Under 40 MB |
+
+This is the difference between a hobby project and a deployable product. The eight lessons in this course taught you how to build that product. This capstone puts it all together.
+
+## System Architecture
+
+<InArticleAd />
+
+
+The gateway sits between your MCU sensor nodes and the cloud. Here is the data flow through the entire system:
+
+**Sensor nodes (ESP32, RPi Pico)** publish JSON readings to MQTT topics over Wi-Fi. Each node connects to the gateway's Mosquitto broker at `tcp://gateway-ip:1883` and publishes to topics like `sensor/esp32-01/temperature` and `sensor/pico-01/humidity`.
+
+**On the gateway**, five components work together:
+
+1. **Mosquitto MQTT broker** accepts connections from all sensor nodes and routes messages to local subscribers.
+2. **Data logger service** (Python) subscribes to `sensor/#`, parses each JSON payload, and inserts a row into the SQLite database. If a reading exceeds a configured threshold, it triggers the camera capture service.
+3. **Web dashboard** (Flask) reads the SQLite database and serves a web page with Chart.js charts showing live and historical data. It also exposes REST API endpoints for programmatic access.
+4. **Camera capture service** (Python) uses fswebcam to take a JPEG snapshot from a USB webcam when triggered by the data logger. Images are stored locally with timestamps.
+5. **MQTT bridge** (Mosquitto bridge configuration) forwards selected topics to a cloud MQTT broker for remote monitoring and long-term storage.
+
+All five services are managed by systemd, which handles startup ordering, automatic restarts, and watchdog monitoring.
+
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│                    RPi Zero 2 W Gateway                             │
+│                                                                     │
+│  ┌──────────────┐    ┌──────────────┐    ┌───────────────────────┐  │
+│  │  Mosquitto   │───>│ Data Logger  │───>│  SQLite Database      │  │
+│  │  MQTT Broker │    │ (Python)     │    │  /var/lib/gateway/    │  │
+│  │  :1883       │    │              │    │  sensor_data.db       │  │
+│  └──────┬───────┘    └──────┬───────┘    └───────────┬───────────┘  │
+│         │                   │                        │              │
+│         │            ┌──────v───────┐    ┌───────────v───────────┐  │
+│         │            │ Camera       │    │  Web Dashboard        │  │
+│         │            │ Capture      │    │  Flask + Chart.js     │  │
+│         │            │ (fswebcam)   │    │  :5000                │  │
+│         │            └──────────────┘    └───────────────────────┘  │
+│         │                                                           │
+│  ┌──────v───────┐                                                   │
+│  │ MQTT Bridge  │──────> Cloud MQTT Broker                          │
+│  │ (forward)    │        (mqtt.siliconwit.io)                       │
+│  └──────────────┘                                                   │
+└─────────────────────────────────────────────────────────────────────┘
+
+    ▲              ▲              ▲
+    │ MQTT         │ MQTT         │ MQTT
+    │              │              │
+
+┌────────┐    ┌────────┐    ┌────────┐
+│ ESP32  │    │ RPi    │    │ STM32  │
+│ Node 1 │    │ Pico   │    │ Node   │
+│        │    │ Node 1 │    │ (UART) │
+└────────┘    └────────┘    └────────┘
+```
+
+The STM32 node connects via UART to one of the Wi-Fi-capable nodes (or through a USB-serial link to the gateway directly), since the STM32F103 does not have built-in Wi-Fi.
+
+## Project Directory Structure
+
+<InArticleAd />
+
+
+This is the complete project layout on your development machine. All source files, configuration, systemd units, and the Yocto recipe live in a single repository:
+
+<FileTree>
+- edge-gateway/
+  - mqtt/
+    - mosquitto.conf
+    - acl.conf
+    - passwd
+    - bridge.conf
+  - datalogger/
+    - gateway_datalogger.py
+    - requirements.txt
+  - dashboard/
+    - gateway_dashboard.py
+    - templates/
+      - index.html
+    - static/
+      - style.css
+    - requirements.txt
+  - camera/
+    - gateway_camera.py
+  - systemd/
+    - mosquitto.service
+    - gateway-datalogger.service
+    - gateway-dashboard.service
+  - schema/
+    - init_db.sql
+  - yocto/
+    - gateway-edge_1.0.bb
+  - tests/
+    - test_publish.py
+    - test_api.py
+  - Makefile
+</FileTree>
+
+## The MQTT Broker (Mosquitto)
+
+<InArticleAd />
+
+
+Mosquitto is a lightweight MQTT broker that runs comfortably on the RPi Zero 2 W. It handles the publish/subscribe messaging between sensor nodes and the gateway services.
+
+### Mosquitto Configuration
+
+```bash title="mqtt/mosquitto.conf"
+# Mosquitto configuration for edge gateway
+# Listener on all interfaces, port 1883
+listener 1883 0.0.0.0
+
+# Persistence: retain messages across broker restarts
+persistence true
+persistence_location /var/lib/mosquitto/
+
+# Logging
+log_dest syslog
+log_type error
+log_type warning
+log_type notice
+
+# Authentication
+allow_anonymous false
+password_file /etc/mosquitto/passwd
+acl_file /etc/mosquitto/acl.conf
+
+# Connection limits
+max_connections 50
+max_queued_messages 1000
+
+# Keep-alive: disconnect clients that stop responding
+max_keepalive 120
+
+# Include bridge configuration
+include_dir /etc/mosquitto/conf.d
+```
+
+### Access Control List
+
+The ACL file controls which clients can publish and subscribe to which topics:
+
+```bash title="mqtt/acl.conf"
+# Sensor nodes can only publish to their own topic subtree
+user esp32-node-01
+topic write sensor/esp32-01/#
+
+user esp32-node-02
+topic write sensor/esp32-02/#
+
+user pico-node-01
+topic write sensor/pico-01/#
+
+# The data logger can subscribe to all sensor topics
+user datalogger
+topic read sensor/#
+
+# The dashboard can read everything
+user dashboard
+topic read sensor/#
+topic read gateway/#
+
+# The bridge user can read and forward
+user bridge
+topic read sensor/#
+topic write cloud/#
+```
+
+### Creating Password File
+
+Generate the Mosquitto password file with hashed credentials:
+
+```bash
+# Create each user (you will be prompted for a password)
+mosquitto_passwd -c /etc/mosquitto/passwd esp32-node-01
+mosquitto_passwd /etc/mosquitto/passwd esp32-node-02
+mosquitto_passwd /etc/mosquitto/passwd pico-node-01
+mosquitto_passwd /etc/mosquitto/passwd datalogger
+mosquitto_passwd /etc/mosquitto/passwd dashboard
+mosquitto_passwd /etc/mosquitto/passwd bridge
+```
+
+### systemd Unit for Mosquitto
+
+```ini title="systemd/mosquitto.service"
+[Unit]
+Description=Mosquitto MQTT Broker
+Documentation=man:mosquitto(8)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=notify
+NotifyAccess=main
+ExecStartPre=/usr/sbin/mosquitto -t -c /etc/mosquitto/mosquitto.conf
+ExecStart=/usr/sbin/mosquitto -c /etc/mosquitto/mosquitto.conf
+ExecReload=/bin/kill -HUP $MAINPID
+Restart=on-failure
+RestartSec=5
+WatchdogSec=30
+
+# Security hardening
+User=mosquitto
+Group=mosquitto
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/mosquitto /var/log/mosquitto
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
+```
+
+### Testing the Broker
+
+After starting Mosquitto, verify it works with the command-line tools:
+
+```bash
+# Start the broker
+sudo systemctl start mosquitto
+sudo systemctl status mosquitto
+
+# In one terminal, subscribe to all sensor topics
+mosquitto_sub -h localhost -u datalogger -P datalogger_pass -t "sensor/#" -v
+
+# In another terminal, simulate a sensor node publishing
+mosquitto_pub -h localhost -u esp32-node-01 -P esp32_pass \
+    -t "sensor/esp32-01/temperature" \
+    -m '{"device_id":"esp32-01","sensor":"bme280","type":"temperature","value":23.5,"unit":"C","ts":1710000000}'
+```
+
+You should see the message appear in the subscriber terminal. This confirms that authentication, ACLs, and message routing are all working.
+
+## The Data Logger Service
+
+<InArticleAd />
+
+
+The data logger is the core service that bridges MQTT messages to persistent storage. It subscribes to all sensor topics, parses JSON payloads, inserts rows into SQLite, checks thresholds for camera triggers, and optionally forwards data to the cloud.
+
+### Python Data Logger
+
+```python title="datalogger/gateway_datalogger.py"
+#!/usr/bin/env python3
+"""
+Edge Gateway Data Logger
+Subscribes to MQTT sensor topics, stores readings in SQLite,
+triggers camera capture on threshold events, and forwards to cloud.
+"""
+
+import json
+import os
+import signal
+import sqlite3
+import subprocess
+import sys
+import time
+from datetime import datetime, timezone
+
+import paho.mqtt.client as mqtt
+
+# Configuration
+MQTT_BROKER = "localhost"
+MQTT_PORT = 1883
+MQTT_USER = "datalogger"
+MQTT_PASS = "datalogger_pass"
+MQTT_TOPICS = [("sensor/#", 1)]
+
+DB_PATH = "/var/lib/gateway/sensor_data.db"
+SNAPSHOT_DIR = "/var/lib/gateway/snapshots"
+CAMERA_SCRIPT = "/usr/bin/gateway-camera-capture"
+
+# Cloud forwarding (optional)
+CLOUD_BROKER = os.environ.get("CLOUD_BROKER", "")
+CLOUD_PORT = int(os.environ.get("CLOUD_PORT", "8883"))
+CLOUD_USER = os.environ.get("CLOUD_USER", "")
+CLOUD_PASS = os.environ.get("CLOUD_PASS", "")
+
+# Thresholds that trigger camera capture
+THRESHOLDS = {
+    "temperature": {"min": -10.0, "max": 45.0},
+    "humidity": {"min": 10.0, "max": 95.0},
+    "pressure": {"min": 950.0, "max": 1060.0},
+}
+
+running = True
+cloud_client = None
+
+def signal_handler(signum, frame):
+    global running
+    running = False
+
+signal.signal(signal.SIGTERM, signal_handler)
+signal.signal(signal.SIGINT, signal_handler)
+
+def init_database(db_path):
+    """Create the database and tables if they do not exist."""
+    os.makedirs(os.path.dirname(db_path), exist_ok=True)
+    conn = sqlite3.connect(db_path)
+    cursor = conn.cursor()
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS readings (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            timestamp TEXT NOT NULL,
+            device_id TEXT NOT NULL,
+            sensor_type TEXT NOT NULL,
+            value REAL NOT NULL,
+            unit TEXT DEFAULT '',
+            raw_payload TEXT DEFAULT ''
+        )
+    """)
+    cursor.execute("""
+        CREATE INDEX IF NOT EXISTS idx_readings_timestamp
+        ON readings (timestamp)
+    """)
+    cursor.execute("""
+        CREATE INDEX IF NOT EXISTS idx_readings_device
+        ON readings (device_id, sensor_type)
+    """)
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS events (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            timestamp TEXT NOT NULL,
+            device_id TEXT NOT NULL,
+            event_type TEXT NOT NULL,
+            description TEXT DEFAULT '',
+            snapshot_path TEXT DEFAULT ''
+        )
+    """)
+    conn.commit()
+    return conn
+
+def insert_reading(conn, device_id, sensor_type, value, unit, raw_payload):
+    """Insert a sensor reading into the database."""
+    timestamp = datetime.now(timezone.utc).isoformat()
+    cursor = conn.cursor()
+    cursor.execute(
+        "INSERT INTO readings (timestamp, device_id, sensor_type, value, unit, raw_payload) "
+        "VALUES (?, ?, ?, ?, ?, ?)",
+        (timestamp, device_id, sensor_type, value, unit, raw_payload),
+    )
+    conn.commit()
+    return timestamp
+
+def check_threshold(sensor_type, value):
+    """Return True if the value exceeds the configured threshold."""
+    if sensor_type not in THRESHOLDS:
+        return False
+    limits = THRESHOLDS[sensor_type]
+    return value < limits["min"] or value > limits["max"]
+
+def trigger_camera(conn, device_id, sensor_type, value):
+    """Capture a snapshot and log the event."""
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+    filename = f"alert_{device_id}_{sensor_type}_{timestamp}.jpg"
+    filepath = os.path.join(SNAPSHOT_DIR, filename)
+
+    os.makedirs(SNAPSHOT_DIR, exist_ok=True)
+
+    try:
+        subprocess.run(
+            [CAMERA_SCRIPT, filepath],
+            timeout=10,
+            check=True,
+            capture_output=True,
+        )
+        print(f"Camera snapshot saved: {filepath}", flush=True)
+    except (subprocess.CalledProcessError, FileNotFoundError) as e:
+        print(f"Camera capture failed: {e}", flush=True)
+        filepath = ""
+
+    cursor = conn.cursor()
+    cursor.execute(
+        "INSERT INTO events (timestamp, device_id, event_type, description, snapshot_path) "
+        "VALUES (?, ?, ?, ?, ?)",
+        (
+            datetime.now(timezone.utc).isoformat(),
+            device_id,
+            "threshold_exceeded",
+            f"{sensor_type}={value}",
+            filepath,
+        ),
+    )
+    conn.commit()
+
+def forward_to_cloud(topic, payload_str):
+    """Forward the message to the cloud MQTT broker if configured."""
+    global cloud_client
+    if cloud_client is None:
+        return
+    try:
+        cloud_topic = f"cloud/{topic}"
+        cloud_client.publish(cloud_topic, payload_str, qos=1)
+    except Exception as e:
+        print(f"Cloud forward failed: {e}", flush=True)
+
+def init_cloud_client():
+    """Initialize the cloud MQTT client if credentials are provided."""
+    global cloud_client
+    if not CLOUD_BROKER:
+        print("Cloud forwarding disabled (no CLOUD_BROKER set)", flush=True)
+        return
+
+    cloud_client = mqtt.Client(client_id="gateway-cloud-fwd", protocol=mqtt.MQTTv311)
+    cloud_client.username_pw_set(CLOUD_USER, CLOUD_PASS)
+    cloud_client.tls_set()
+
+    try:
+        cloud_client.connect(CLOUD_BROKER, CLOUD_PORT, keepalive=60)
+        cloud_client.loop_start()
+        print(f"Connected to cloud broker: {CLOUD_BROKER}:{CLOUD_PORT}", flush=True)
+    except Exception as e:
+        print(f"Cloud connection failed: {e}", flush=True)
+        cloud_client = None
+
+def on_connect(client, userdata, flags, rc):
+    if rc == 0:
+        print("Connected to local MQTT broker", flush=True)
+        for topic, qos in MQTT_TOPICS:
+            client.subscribe(topic, qos)
+            print(f"Subscribed to: {topic}", flush=True)
+    else:
+        print(f"MQTT connection failed with code: {rc}", flush=True)
+
+def on_message(client, userdata, msg):
+    conn = userdata["db"]
+    payload_str = msg.payload.decode("utf-8", errors="replace")
+
+    try:
+        data = json.loads(payload_str)
+    except json.JSONDecodeError:
+        print(f"Invalid JSON on {msg.topic}: {payload_str[:100]}", flush=True)
+        return
+
+    device_id = data.get("device_id", "unknown")
+    sensor_type = data.get("type", "unknown")
+    value = data.get("value")
+    unit = data.get("unit", "")
+
+    if value is None:
+        print(f"Missing 'value' field on {msg.topic}", flush=True)
+        return
+
+    try:
+        value = float(value)
+    except (ValueError, TypeError):
+        print(f"Non-numeric value on {msg.topic}: {value}", flush=True)
+        return
+
+    # Store in database
+    ts = insert_reading(conn, device_id, sensor_type, value, unit, payload_str)
+    print(f"[{ts}] {device_id}/{sensor_type}: {value} {unit}", flush=True)
+
+    # Check thresholds
+    if check_threshold(sensor_type, value):
+        print(f"THRESHOLD EXCEEDED: {device_id}/{sensor_type}={value}", flush=True)
+        trigger_camera(conn, device_id, sensor_type, value)
+
+    # Forward to cloud
+    forward_to_cloud(msg.topic, payload_str)
+
+def main():
+    print("Edge Gateway Data Logger starting...", flush=True)
+
+    # Initialize database
+    conn = init_database(DB_PATH)
+    print(f"Database initialized: {DB_PATH}", flush=True)
+
+    # Initialize cloud forwarding
+    init_cloud_client()
+
+    # Set up local MQTT client
+    userdata = {"db": conn}
+    client = mqtt.Client(
+        client_id="gateway-datalogger",
+        protocol=mqtt.MQTTv311,
+        userdata=userdata,
+    )
+    client.username_pw_set(MQTT_USER, MQTT_PASS)
+    client.on_connect = on_connect
+    client.on_message = on_message
+
+    client.connect(MQTT_BROKER, MQTT_PORT, keepalive=60)
+    client.loop_start()
+
+    # Main loop: keep running until signaled to stop
+    while running:
+        time.sleep(1)
+
+    # Cleanup
+    print("Shutting down...", flush=True)
+    client.loop_stop()
+    client.disconnect()
+    if cloud_client:
+        cloud_client.loop_stop()
+        cloud_client.disconnect()
+    conn.close()
+    print("Data logger stopped.", flush=True)
+
+if __name__ == "__main__":
+    main()
+```
+
+### Data Logger Dependencies
+
+```text title="datalogger/requirements.txt"
+paho-mqtt>=1.6.0,<2.0
+```
+
+### systemd Unit for the Data Logger
+
+```ini title="systemd/gateway-datalogger.service"
+[Unit]
+Description=Edge Gateway Data Logger
+Documentation=https://siliconwit.com/education/embedded-linux-rpi/edge-gateway-mcu-sensor-network
+After=mosquitto.service network-online.target
+Requires=mosquitto.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 /opt/gateway/datalogger/gateway_datalogger.py
+Restart=on-failure
+RestartSec=5
+WatchdogSec=60
+
+# Environment file for cloud credentials (optional)
+EnvironmentFile=-/etc/gateway/cloud.env
+
+# Run as a dedicated user
+User=gateway
+Group=gateway
+
+# Security hardening
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/gateway
+NoNewPrivileges=true
+PrivateTmp=true
+
+# Resource limits
+MemoryMax=64M
+CPUQuota=25%
+
+[Install]
+WantedBy=multi-user.target
+```
+
+The `EnvironmentFile=-/etc/gateway/cloud.env` line (note the dash prefix) means the file is optional. If it exists, it provides `CLOUD_BROKER`, `CLOUD_USER`, and `CLOUD_PASS` environment variables. If it does not exist, the service starts without cloud forwarding.
+
+## SQLite Database Schema
+
+<InArticleAd />
+
+
+SQLite is the right database for an edge gateway. It requires no server process, stores everything in a single file, handles concurrent reads safely, and works with the standard Python `sqlite3` module that ships with CPython. On the RPi Zero 2 W with 512 MB of RAM, SQLite can comfortably hold millions of rows.
+
+### Schema Definition
+
+```sql title="schema/init_db.sql"
+-- Sensor readings table
+CREATE TABLE IF NOT EXISTS readings (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    timestamp TEXT NOT NULL,
+    device_id TEXT NOT NULL,
+    sensor_type TEXT NOT NULL,
+    value REAL NOT NULL,
+    unit TEXT DEFAULT '',
+    raw_payload TEXT DEFAULT ''
+);
+
+-- Indexes for common queries
+CREATE INDEX IF NOT EXISTS idx_readings_timestamp
+    ON readings (timestamp);
+
+CREATE INDEX IF NOT EXISTS idx_readings_device
+    ON readings (device_id, sensor_type);
+
+CREATE INDEX IF NOT EXISTS idx_readings_type_time
+    ON readings (sensor_type, timestamp);
+
+-- Threshold events and camera captures
+CREATE TABLE IF NOT EXISTS events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    timestamp TEXT NOT NULL,
+    device_id TEXT NOT NULL,
+    event_type TEXT NOT NULL,
+    description TEXT DEFAULT '',
+    snapshot_path TEXT DEFAULT ''
+);
+
+CREATE INDEX IF NOT EXISTS idx_events_timestamp
+    ON events (timestamp);
+```
+
+The data logger creates these tables automatically on first run, but you can also initialize the database manually:
+
+```bash
+sqlite3 /var/lib/gateway/sensor_data.db < schema/init_db.sql
+```
+
+### Useful Queries
+
+Query the last hour of temperature readings:
+
+```sql
+SELECT timestamp, device_id, value, unit
+FROM readings
+WHERE sensor_type = 'temperature'
+  AND timestamp >= datetime('now', '-1 hour')
+ORDER BY timestamp DESC;
+```
+
+Daily average temperature per device:
+
+```sql
+SELECT device_id,
+       date(timestamp) AS day,
+       ROUND(AVG(value), 2) AS avg_temp,
+       ROUND(MIN(value), 2) AS min_temp,
+       ROUND(MAX(value), 2) AS max_temp,
+       COUNT(*) AS num_readings
+FROM readings
+WHERE sensor_type = 'temperature'
+GROUP BY device_id, date(timestamp)
+ORDER BY day DESC, device_id;
+```
+
+List all active devices (those that reported in the last 10 minutes):
+
+```sql
+SELECT DISTINCT device_id,
+       MAX(timestamp) AS last_seen,
+       COUNT(*) AS total_readings
+FROM readings
+WHERE timestamp >= datetime('now', '-10 minutes')
+GROUP BY device_id
+ORDER BY last_seen DESC;
+```
+
+Storage estimation: each reading row is roughly 150 bytes. At one reading per sensor per minute with 3 sensors on 2 nodes, that is 6 rows per minute, 8,640 per day, about 1.3 MB per day. A 4 GB data partition can hold over 8 years of data at this rate.
+
+### Database Maintenance
+
+Over time, you may want to prune old data. A simple cron job or systemd timer handles this:
+
+```bash
+# Delete readings older than 90 days
+sqlite3 /var/lib/gateway/sensor_data.db \
+    "DELETE FROM readings WHERE timestamp < datetime('now', '-90 days');"
+
+# Reclaim disk space
+sqlite3 /var/lib/gateway/sensor_data.db "VACUUM;"
+```
+
+## The Web Dashboard
+
+<InArticleAd />
+
+
+The dashboard gives you a browser-based view of all sensor data. It reads from the same SQLite database that the data logger writes to. Flask serves both the HTML page (with embedded Chart.js) and a set of REST API endpoints.
+
+### Flask Application
+
+```python title="dashboard/gateway_dashboard.py"
+#!/usr/bin/env python3
+"""
+Edge Gateway Web Dashboard
+Serves live sensor charts and REST API endpoints.
+Reads from the SQLite database populated by the data logger.
+"""
+
+import json
+import os
+import sqlite3
+from datetime import datetime, timezone
+
+from flask import Flask, jsonify, render_template, request, send_from_directory
+
+app = Flask(__name__)
+
+DB_PATH = os.environ.get("GATEWAY_DB_PATH", "/var/lib/gateway/sensor_data.db")
+SNAPSHOT_DIR = "/var/lib/gateway/snapshots"
+
+def get_db():
+    """Get a database connection with row factory."""
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    return conn
+
+@app.route("/")
+def index():
+    """Serve the main dashboard page."""
+    return render_template("index.html")
+
+@app.route("/api/latest")
+def api_latest():
+    """Return the latest reading for each device and sensor type."""
+    conn = get_db()
+    cursor = conn.cursor()
+    cursor.execute("""
+        SELECT r.device_id, r.sensor_type, r.value, r.unit, r.timestamp
+        FROM readings r
+        INNER JOIN (
+            SELECT device_id, sensor_type, MAX(id) AS max_id
+            FROM readings
+            GROUP BY device_id, sensor_type
+        ) latest ON r.id = latest.max_id
+        ORDER BY r.device_id, r.sensor_type
+    """)
+    rows = cursor.fetchall()
+    conn.close()
+
+    result = []
+    for row in rows:
+        result.append({
+            "device_id": row["device_id"],
+            "sensor_type": row["sensor_type"],
+            "value": row["value"],
+            "unit": row["unit"],
+            "timestamp": row["timestamp"],
+        })
+    return jsonify(result)
+
+@app.route("/api/history")
+def api_history():
+    """Return historical readings. Query params: hours (default 24), device, type."""
+    hours = request.args.get("hours", 24, type=int)
+    device = request.args.get("device", None)
+    sensor_type = request.args.get("type", None)
+
+    hours = min(hours, 720)  # Cap at 30 days
+
+    conn = get_db()
+    cursor = conn.cursor()
+
+    query = """
+        SELECT device_id, sensor_type, value, unit, timestamp
+        FROM readings
+        WHERE timestamp >= datetime('now', ?)
+    """
+    params = [f"-{hours} hours"]
+
+    if device:
+        query += " AND device_id = ?"
+        params.append(device)
+    if sensor_type:
+        query += " AND sensor_type = ?"
+        params.append(sensor_type)
+
+    query += " ORDER BY timestamp ASC"
+    cursor.execute(query, params)
+    rows = cursor.fetchall()
+    conn.close()
+
+    result = []
+    for row in rows:
+        result.append({
+            "device_id": row["device_id"],
+            "sensor_type": row["sensor_type"],
+            "value": row["value"],
+            "unit": row["unit"],
+            "timestamp": row["timestamp"],
+        })
+    return jsonify(result)
+
+@app.route("/api/devices")
+def api_devices():
+    """Return a list of known devices with their last activity time."""
+    conn = get_db()
+    cursor = conn.cursor()
+    cursor.execute("""
+        SELECT device_id,
+               MAX(timestamp) AS last_seen,
+               COUNT(*) AS total_readings,
+               GROUP_CONCAT(DISTINCT sensor_type) AS sensor_types
+        FROM readings
+        GROUP BY device_id
+        ORDER BY last_seen DESC
+    """)
+    rows = cursor.fetchall()
+    conn.close()
+
+    result = []
+    for row in rows:
+        result.append({
+            "device_id": row["device_id"],
+            "last_seen": row["last_seen"],
+            "total_readings": row["total_readings"],
+            "sensor_types": row["sensor_types"].split(",") if row["sensor_types"] else [],
+        })
+    return jsonify(result)
+
+@app.route("/api/events")
+def api_events():
+    """Return recent threshold events."""
+    limit = request.args.get("limit", 50, type=int)
+    limit = min(limit, 200)
+
+    conn = get_db()
+    cursor = conn.cursor()
+    cursor.execute("""
+        SELECT id, timestamp, device_id, event_type, description, snapshot_path
+        FROM events
+        ORDER BY timestamp DESC
+        LIMIT ?
+    """, (limit,))
+    rows = cursor.fetchall()
+    conn.close()
+
+    result = []
+    for row in rows:
+        result.append({
+            "id": row["id"],
+            "timestamp": row["timestamp"],
+            "device_id": row["device_id"],
+            "event_type": row["event_type"],
+            "description": row["description"],
+            "has_snapshot": bool(row["snapshot_path"]),
+        })
+    return jsonify(result)
+
+@app.route("/api/snapshots/<filename>")
+def api_snapshot(filename):
+    """Serve a camera snapshot image."""
+    # Basic path traversal protection
+    if ".." in filename or "/" in filename:
+        return "Invalid filename", 400
+    return send_from_directory(SNAPSHOT_DIR, filename)
+
+@app.route("/api/stats")
+def api_stats():
+    """Return database statistics."""
+    conn = get_db()
+    cursor = conn.cursor()
+
+    cursor.execute("SELECT COUNT(*) FROM readings")
+    total_readings = cursor.fetchone()[0]
+
+    cursor.execute("SELECT COUNT(DISTINCT device_id) FROM readings")
+    total_devices = cursor.fetchone()[0]
+
+    cursor.execute("SELECT MIN(timestamp), MAX(timestamp) FROM readings")
+    row = cursor.fetchone()
+    oldest = row[0]
+    newest = row[1]
+
+    cursor.execute("SELECT COUNT(*) FROM events")
+    total_events = cursor.fetchone()[0]
+
+    conn.close()
+
+    return jsonify({
+        "total_readings": total_readings,
+        "total_devices": total_devices,
+        "oldest_reading": oldest,
+        "newest_reading": newest,
+        "total_events": total_events,
+    })
+
+if __name__ == "__main__":
+    app.run(host="0.0.0.0", port=5000, debug=False)
+```
+
+### Dashboard HTML Template
+
+The HTML template uses Chart.js from a CDN to render live charts. It fetches data from the REST API endpoints and updates the charts periodically:
+
+```html title="dashboard/templates/index.html"
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Edge Gateway Dashboard</title>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+            background: #0f172a;
+            color: #e2e8f0;
+            padding: 1rem;
+        }
+        h1 { text-align: center; margin-bottom: 0.5rem; color: #38bdf8; }
+        .subtitle { text-align: center; color: #94a3b8; margin-bottom: 1.5rem; }
+        .grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+            gap: 1rem;
+            margin-bottom: 1.5rem;
+        }
+        .card {
+            background: #1e293b;
+            border-radius: 8px;
+            padding: 1rem;
+            border: 1px solid #334155;
+        }
+        .card h2 { font-size: 1rem; color: #94a3b8; margin-bottom: 0.5rem; }
+        .card .value { font-size: 2rem; font-weight: bold; color: #38bdf8; }
+        .card .unit { font-size: 1rem; color: #64748b; }
+        .card .device { font-size: 0.8rem; color: #64748b; }
+        .chart-container {
+            background: #1e293b;
+            border-radius: 8px;
+            padding: 1rem;
+            border: 1px solid #334155;
+            margin-bottom: 1rem;
+        }
+        .chart-container h2 { color: #94a3b8; margin-bottom: 0.5rem; }
+        .status { text-align: center; padding: 0.5rem; color: #64748b; font-size: 0.85rem; }
+        .status .online { color: #4ade80; }
+        .events-list { max-height: 200px; overflow-y: auto; }
+        .event-item {
+            padding: 0.4rem 0;
+            border-bottom: 1px solid #334155;
+            font-size: 0.85rem;
+        }
+        .event-item .event-time { color: #64748b; }
+        .event-item .event-desc { color: #fbbf24; }
+    </style>
+</head>
+<body>
+    <h1>Edge Gateway Dashboard</h1>
+    <p class="subtitle">RPi Zero 2 W Sensor Network Monitor</p>
+
+    <div class="grid" id="current-readings">
+        <div class="card">
+            <h2>Loading...</h2>
+            <div class="value">--</div>
+        </div>
+    </div>
+
+    <div class="chart-container">
+        <h2>Temperature History (Last 6 Hours)</h2>
+        <canvas id="tempChart" height="100"></canvas>
+    </div>
+
+    <div class="chart-container">
+        <h2>Humidity History (Last 6 Hours)</h2>
+        <canvas id="humChart" height="100"></canvas>
+    </div>
+
+    <div class="grid">
+        <div class="card">
+            <h2>Connected Devices</h2>
+            <div id="device-list">Loading...</div>
+        </div>
+        <div class="card">
+            <h2>Recent Events</h2>
+            <div id="events-list" class="events-list">Loading...</div>
+        </div>
+    </div>
+
+    <p class="status">
+        Auto-refresh: every 10 seconds |
+        Gateway status: <span id="gw-status" class="online">online</span> |
+        <span id="last-update"></span>
+    </p>
+
+    <script>
+        const REFRESH_INTERVAL = 10000;
+        let tempChart = null;
+        let humChart = null;
+
+        function createChart(canvasId, label, borderColor, bgColor) {
+            const ctx = document.getElementById(canvasId).getContext('2d');
+            return new Chart(ctx, {
+                type: 'line',
+                data: { labels: [], datasets: [] },
+                options: {
+                    responsive: true,
+                    interaction: { intersect: false, mode: 'index' },
+                    scales: {
+                        x: {
+                            ticks: { color: '#64748b', maxTicksLimit: 12 },
+                            grid: { color: '#334155' }
+                        },
+                        y: {
+                            ticks: { color: '#64748b' },
+                            grid: { color: '#334155' }
+                        }
+                    },
+                    plugins: {
+                        legend: { labels: { color: '#94a3b8' } }
+                    }
+                }
+            });
+        }
+
+        const COLORS = ['#38bdf8', '#4ade80', '#fbbf24', '#f87171', '#a78bfa', '#fb923c'];
+
+        async function fetchLatest() {
+            try {
+                const resp = await fetch('/api/latest');
+                const data = await resp.json();
+                const container = document.getElementById('current-readings');
+                container.innerHTML = '';
+
+                data.forEach(item => {
+                    const card = document.createElement('div');
+                    card.className = 'card';
+                    card.innerHTML = `
+                        <h2>${item.sensor_type.charAt(0).toUpperCase() + item.sensor_type.slice(1)}</h2>
+                        <div class="value">${item.value.toFixed(1)} <span class="unit">${item.unit}</span></div>
+                        <div class="device">${item.device_id} | ${new Date(item.timestamp).toLocaleTimeString()}</div>
+                    `;
+                    container.appendChild(card);
+                });
+            } catch (e) {
+                console.error('Failed to fetch latest:', e);
+            }
+        }
+
+        async function fetchHistory(chart, sensorType) {
+            try {
+                const resp = await fetch(`/api/history?hours=6&type=${sensorType}`);
+                const data = await resp.json();
+
+                const devices = [...new Set(data.map(d => d.device_id))];
+                const datasets = devices.map((dev, i) => {
+                    const points = data.filter(d => d.device_id === dev);
+                    return {
+                        label: dev,
+                        data: points.map(p => p.value),
+                        borderColor: COLORS[i % COLORS.length],
+                        backgroundColor: COLORS[i % COLORS.length] + '20',
+                        tension: 0.3,
+                        pointRadius: 0,
+                        borderWidth: 2,
+                        fill: true
+                    };
+                });
+
+                const allPoints = data.filter(d => d.device_id === devices[0]);
+                const labels = allPoints.map(p => {
+                    const dt = new Date(p.timestamp);
+                    return dt.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+                });
+
+                chart.data.labels = labels;
+                chart.data.datasets = datasets;
+                chart.update('none');
+            } catch (e) {
+                console.error(`Failed to fetch ${sensorType} history:`, e);
+            }
+        }
+
+        async function fetchDevices() {
+            try {
+                const resp = await fetch('/api/devices');
+                const data = await resp.json();
+                const container = document.getElementById('device-list');
+                container.innerHTML = data.map(d => {
+                    const ago = Math.round((Date.now() - new Date(d.last_seen).getTime()) / 1000);
+                    const status = ago < 120 ? '🟢' : '🔴';
+                    return `<div style="padding:0.3rem 0;border-bottom:1px solid #334155;">
+                        ${status} <strong>${d.device_id}</strong> (${d.sensor_types.join(', ')})
+                        <br><span style="color:#64748b;font-size:0.8rem;">${d.total_readings} readings, last seen ${ago}s ago</span>
+                    </div>`;
+                }).join('');
+            } catch (e) {
+                console.error('Failed to fetch devices:', e);
+            }
+        }
+
+        async function fetchEvents() {
+            try {
+                const resp = await fetch('/api/events?limit=20');
+                const data = await resp.json();
+                const container = document.getElementById('events-list');
+                if (data.length === 0) {
+                    container.innerHTML = '<div style="color:#64748b;">No events recorded</div>';
+                    return;
+                }
+                container.innerHTML = data.map(e => `
+                    <div class="event-item">
+                        <span class="event-time">${new Date(e.timestamp).toLocaleString()}</span>
+                        <span class="event-desc">${e.device_id}: ${e.description}</span>
+                    </div>
+                `).join('');
+            } catch (e) {
+                console.error('Failed to fetch events:', e);
+            }
+        }
+
+        async function refreshAll() {
+            await Promise.all([
+                fetchLatest(),
+                fetchHistory(tempChart, 'temperature'),
+                fetchHistory(humChart, 'humidity'),
+                fetchDevices(),
+                fetchEvents()
+            ]);
+            document.getElementById('last-update').textContent =
+                'Last update: ' + new Date().toLocaleTimeString();
+        }
+
+        window.addEventListener('load', () => {
+            tempChart = createChart('tempChart', 'Temperature', '#38bdf8', '#38bdf820');
+            humChart = createChart('humChart', 'Humidity', '#4ade80', '#4ade8020');
+            refreshAll();
+            setInterval(refreshAll, REFRESH_INTERVAL);
+        });
+    </script>
+</body>
+</html>
+```
+
+### Dashboard Dependencies
+
+```text title="dashboard/requirements.txt"
+Flask>=3.0.0
+```
+
+### systemd Unit for the Dashboard
+
+```ini title="systemd/gateway-dashboard.service"
+[Unit]
+Description=Edge Gateway Web Dashboard
+Documentation=https://siliconwit.com/education/embedded-linux-rpi/edge-gateway-mcu-sensor-network
+After=gateway-datalogger.service
+Wants=gateway-datalogger.service
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 /opt/gateway/dashboard/gateway_dashboard.py
+Environment=GATEWAY_DB_PATH=/var/lib/gateway/sensor_data.db
+Restart=on-failure
+RestartSec=5
+
+User=gateway
+Group=gateway
+
+ProtectSystem=strict
+ProtectHome=true
+ReadOnlyPaths=/var/lib/gateway
+NoNewPrivileges=true
+PrivateTmp=true
+
+MemoryMax=48M
+CPUQuota=20%
+
+[Install]
+WantedBy=multi-user.target
+```
+
+Notice that the dashboard service uses `ReadOnlyPaths` for the database directory. It only needs to read the SQLite file; the data logger handles all writes.
+
+## USB Camera Capture
+
+<InArticleAd />
+
+
+One of the clearest advantages of embedded Linux over a microcontroller is USB host support. The RPi Zero 2 W can drive a standard USB webcam through the v4l2 (Video4Linux2) subsystem that is built into the kernel. No special drivers are needed for UVC-compliant cameras (which covers most USB webcams sold today).
+
+### Installing fswebcam
+
+On a Buildroot or Yocto image, include fswebcam in your package list. For testing on a Raspberry Pi OS installation:
+
+```bash
+sudo apt install fswebcam v4l-utils
+
+# Verify the camera is detected
+v4l2-ctl --list-devices
+
+# Take a test snapshot
+fswebcam -r 640x480 --no-banner test.jpg
+```
+
+### Camera Capture Script
+
+```python title="camera/gateway_camera.py"
+#!/usr/bin/env python3
+"""
+Edge Gateway Camera Capture
+Takes a JPEG snapshot from a USB webcam using fswebcam.
+Called by the data logger when sensor thresholds are exceeded.
+"""
+
+import subprocess
+import sys
+import os
+from datetime import datetime, timezone
+
+def capture(output_path, resolution="640x480", device="/dev/video0"):
+    """Capture a single JPEG frame from the USB camera."""
+    os.makedirs(os.path.dirname(output_path), exist_ok=True)
+
+    cmd = [
+        "fswebcam",
+        "--device", device,
+        "--resolution", resolution,
+        "--no-banner",
+        "--jpeg", "85",
+        "--skip", "2",          # Skip first 2 frames (auto-exposure settle)
+        "--frames", "1",
+        "--save", output_path,
+    ]
+
+    try:
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+        if result.returncode != 0:
+            print(f"fswebcam error: {result.stderr}", file=sys.stderr)
+            return False
+
+        size = os.path.getsize(output_path)
+        print(f"Captured {output_path} ({size} bytes)")
+        return True
+
+    except subprocess.TimeoutExpired:
+        print("Camera capture timed out", file=sys.stderr)
+        return False
+    except FileNotFoundError:
+        print("fswebcam not found. Install with: apt install fswebcam", file=sys.stderr)
+        return False
+
+def main():
+    if len(sys.argv) < 2:
+        # Generate a default filename with timestamp
+        timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+        output = f"/var/lib/gateway/snapshots/capture_{timestamp}.jpg"
+    else:
+        output = sys.argv[1]
+
+    success = capture(output)
+    sys.exit(0 if success else 1)
+
+if __name__ == "__main__":
+    main()
+```
+
+Make the script executable and install it:
+
+```bash
+chmod +x camera/gateway_camera.py
+sudo cp camera/gateway_camera.py /usr/bin/gateway-camera-capture
+```
+
+### How It Integrates
+
+The data logger calls the camera capture script whenever a threshold is exceeded. Looking back at the `trigger_camera()` function in `gateway_datalogger.py`:
+
+```python
+subprocess.run(
+    [CAMERA_SCRIPT, filepath],
+    timeout=10,
+    check=True,
+    capture_output=True,
+)
+```
+
+This executes `gateway-camera-capture /var/lib/gateway/snapshots/alert_esp32-01_temperature_20260312_143022.jpg`. The snapshot is saved to disk and the event is recorded in the `events` table, which the dashboard displays.
+
+### Why This Cannot Run on an MCU
+
+A USB webcam requires:
+
+- A USB host controller with the full USB protocol stack
+- The UVC (USB Video Class) driver in the kernel
+- The v4l2 subsystem for camera enumeration and frame capture
+- Enough RAM to buffer at least one full frame (640x480 at 24-bit color is 900 KB)
+- A filesystem to write the JPEG file to
+
+The ESP32 has a USB peripheral, but it operates in device mode (not host mode). The STM32F103 has no USB host support. The RPi Pico has USB but lacks the memory and OS infrastructure for UVC. Only an embedded Linux system provides all of these components out of the box.
+
+## Cloud Forwarding
+
+<InArticleAd />
+
+
+The gateway can forward sensor data to any cloud MQTT broker for remote monitoring, long-term archival, alerting, and analytics. The examples in this lesson use [SiliconWit.io](https://siliconwit.io), which accepts MQTT on `mqtt.siliconwit.io:8883` (TLS) and provides live dashboards, configurable alerts (email, SMS, Discord, Slack, Telegram), remote device control, anomaly detection, and a REST API for custom integrations. The free tier supports 3 devices with 7-day data retention, enough to complete this lesson. You can substitute any MQTT broker (HiveMQ, EMQX, AWS IoT Core, your own Mosquitto instance) by changing the broker address and credentials. There are two approaches to forwarding: Mosquitto's built-in bridge, and application-level REST forwarding.
+
+### Mosquitto Bridge Configuration
+
+The Mosquitto bridge creates a persistent connection from your local broker to a remote broker and automatically forwards messages matching specified topic patterns:
+
+```bash title="mqtt/bridge.conf"
+# Bridge to cloud MQTT broker
+# Place this file in /etc/mosquitto/conf.d/
+
+connection cloud-bridge
+address mqtt.siliconwit.io:8883
+
+# TLS settings
+bridge_cafile /etc/ssl/certs/ca-certificates.crt
+bridge_tls_version tlsv1.2
+
+# Authentication (use your SiliconWit.io Device ID and Access Token)
+remote_username your_device_id
+remote_password your_access_token
+
+# Topic mapping: local topic -> remote topic
+# Pattern: topic direction QoS local-prefix remote-prefix
+# SiliconWit.io publish topic format: d/{device_id}/t
+topic sensor/# out 1 "" d/your_device_id/t/
+topic events/# out 1 "" d/your_device_id/t/
+
+# Connection behavior
+start_type automatic
+try_private true
+cleansession false
+keepalive_interval 60
+restart_timeout 10 30
+
+# Throttle: max 100 messages per second to cloud
+# (prevents flooding during reconnection with queued messages)
+bridge_max_packet_size 4096
+
+# Notification topic (publishes connection status)
+notifications true
+notification_topic gateway/rpi-01/status
+```
+
+With this configuration, a message published locally on `sensor/esp32-01/temperature` arrives at SiliconWit.io under your device's data topic. The `out` direction means messages flow from local to remote only. Change to `both` and add a subscribe topic (`d/your_device_id/c/#`) if you want to receive commands from the cloud, for example to toggle a relay or adjust a threshold remotely through the SiliconWit.io dashboard.
+
+### REST API Forwarding (Alternative)
+
+If your cloud platform uses a REST API instead of MQTT (for example, a time-series database or a custom backend), you can add an HTTP forwarding path. Here is a standalone forwarder that reads from the SQLite database and posts batches to an HTTP endpoint:
+
+```python title="forward_rest.py"
+#!/usr/bin/env python3
+"""
+REST API forwarder: reads recent readings from SQLite
+and POSTs them to a cloud HTTP endpoint in batches.
+"""
+
+import json
+import os
+import sqlite3
+import time
+import urllib.request
+import urllib.error
+
+DB_PATH = "/var/lib/gateway/sensor_data.db"
+API_URL = os.environ.get("CLOUD_API_URL", "https://api.siliconwit.io/v1/ingest")
+API_KEY = os.environ.get("CLOUD_API_KEY", "")
+BATCH_SIZE = 50
+INTERVAL = 60  # seconds between batches
+
+# Track the last forwarded row ID
+STATE_FILE = "/var/lib/gateway/forward_state.json"
+
+def load_state():
+    if os.path.exists(STATE_FILE):
+        with open(STATE_FILE, "r") as f:
+            return json.load(f)
+    return {"last_id": 0}
+
+def save_state(state):
+    with open(STATE_FILE, "w") as f:
+        json.dump(state, f)
+
+def fetch_new_readings(db_path, last_id, limit):
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+    cursor.execute(
+        "SELECT id, timestamp, device_id, sensor_type, value, unit "
+        "FROM readings WHERE id > ? ORDER BY id ASC LIMIT ?",
+        (last_id, limit),
+    )
+    rows = [dict(row) for row in cursor.fetchall()]
+    conn.close()
+    return rows
+
+def post_batch(readings):
+    payload = json.dumps({"readings": readings}).encode("utf-8")
+    req = urllib.request.Request(
+        API_URL,
+        data=payload,
+        headers={
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {API_KEY}",
+        },
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            return resp.status == 200
+    except urllib.error.URLError as e:
+        print(f"POST failed: {e}")
+        return False
+
+def main():
+    state = load_state()
+    while True:
+        readings = fetch_new_readings(DB_PATH, state["last_id"], BATCH_SIZE)
+        if readings:
+            if post_batch(readings):
+                state["last_id"] = readings[-1]["id"]
+                save_state(state)
+                print(f"Forwarded {len(readings)} readings (up to id {state['last_id']})")
+            else:
+                print("Forward failed, will retry next cycle")
+        time.sleep(INTERVAL)
+
+if __name__ == "__main__":
+    main()
+```
+
+This approach works with any HTTP-based cloud service and does not require MQTT support on the cloud side. The state file ensures no readings are sent twice, even across service restarts.
+
+If you are using [SiliconWit.io](https://siliconwit.io), your data appears on the dashboard automatically once the bridge connects: live charts, threshold alerts, and remote device control work without any additional cloud code. If you are using a different broker, the MQTT messages arrive in the same standard format and can be consumed by any subscriber.
+
+## Packaging as a Yocto Recipe
+
+<InArticleAd />
+
+
+To deploy this gateway as a reproducible, flashable image, package everything into a BitBake recipe that extends the meta-siliconwit-rpi layer from Lesson 8. The recipe installs all Python scripts, configuration files, and systemd units into the correct locations on the target root filesystem.
+
+### Gateway BitBake Recipe
+
+```python title="yocto/gateway-edge_1.0.bb"
+SUMMARY = "Edge Gateway for MCU Sensor Networks"
+DESCRIPTION = "MQTT broker, data logger, web dashboard, camera capture, \
+and cloud forwarding for an IoT edge gateway on the Raspberry Pi Zero 2 W."
+LICENSE = "MIT"
+LIC_FILES_CHKSUM = "file://${COMMON_LICENSE_DIR}/MIT;md5=0835ade698e0bcf8506ecda2f7b4f302"
+
+SRC_URI = " \
+    file://gateway_datalogger.py \
+    file://gateway_dashboard.py \
+    file://gateway_camera.py \
+    file://index.html \
+    file://style.css \
+    file://mosquitto.conf \
+    file://acl.conf \
+    file://bridge.conf \
+    file://init_db.sql \
+    file://gateway-datalogger.service \
+    file://gateway-dashboard.service \
+    file://mosquitto.service \
+"
+
+S = "${WORKDIR}"
+
+inherit systemd
+
+SYSTEMD_SERVICE:${PN} = " \
+    gateway-datalogger.service \
+    gateway-dashboard.service \
+"
+SYSTEMD_AUTO_ENABLE = "enable"
+
+RDEPENDS:${PN} = " \
+    python3 \
+    python3-paho-mqtt \
+    python3-flask \
+    python3-json \
+    python3-sqlite3 \
+    python3-datetime \
+    mosquitto \
+    mosquitto-clients \
+    fswebcam \
+    sqlite3 \
+"
+
+do_install() {
+    # Python application files
+    install -d ${D}/opt/gateway/datalogger
+    install -m 0755 gateway_datalogger.py ${D}/opt/gateway/datalogger/
+
+    install -d ${D}/opt/gateway/dashboard
+    install -m 0755 gateway_dashboard.py ${D}/opt/gateway/dashboard/
+
+    install -d ${D}/opt/gateway/dashboard/templates
+    install -m 0644 index.html ${D}/opt/gateway/dashboard/templates/
+
+    install -d ${D}/opt/gateway/dashboard/static
+    install -m 0644 style.css ${D}/opt/gateway/dashboard/static/
+
+    # Camera capture script
+    install -d ${D}${bindir}
+    install -m 0755 gateway_camera.py ${D}${bindir}/gateway-camera-capture
+
+    # Mosquitto configuration
+    install -d ${D}${sysconfdir}/mosquitto
+    install -m 0644 mosquitto.conf ${D}${sysconfdir}/mosquitto/
+    install -m 0640 acl.conf ${D}${sysconfdir}/mosquitto/
+
+    install -d ${D}${sysconfdir}/mosquitto/conf.d
+    install -m 0640 bridge.conf ${D}${sysconfdir}/mosquitto/conf.d/
+
+    # Database schema
+    install -d ${D}/opt/gateway/schema
+    install -m 0644 init_db.sql ${D}/opt/gateway/schema/
+
+    # systemd units
+    install -d ${D}${systemd_system_unitdir}
+    install -m 0644 gateway-datalogger.service ${D}${systemd_system_unitdir}/
+    install -m 0644 gateway-dashboard.service ${D}${systemd_system_unitdir}/
+
+    # Runtime directories
+    install -d ${D}/var/lib/gateway
+    install -d ${D}/var/lib/gateway/snapshots
+
+    # Gateway environment file placeholder
+    install -d ${D}${sysconfdir}/gateway
+}
+
+FILES:${PN} = " \
+    /opt/gateway \
+    ${bindir}/gateway-camera-capture \
+    ${sysconfdir}/mosquitto \
+    ${sysconfdir}/gateway \
+    ${systemd_system_unitdir}/gateway-datalogger.service \
+    ${systemd_system_unitdir}/gateway-dashboard.service \
+    /var/lib/gateway \
+"
+
+CONFFILES:${PN} = " \
+    ${sysconfdir}/mosquitto/mosquitto.conf \
+    ${sysconfdir}/mosquitto/acl.conf \
+    ${sysconfdir}/mosquitto/conf.d/bridge.conf \
+"
+```
+
+### Adding to the Image Recipe
+
+Extend the image recipe from Lesson 8 to include the gateway package:
+
+```python title="siliconwit-image-gateway.bb"
+SUMMARY = "SiliconWit Edge Gateway Image"
+DESCRIPTION = "Production image with MQTT broker, data logger, \
+web dashboard, camera capture, and cloud forwarding."
+LICENSE = "MIT"
+
+inherit core-image
+
+require siliconwit-image-sensor.bb
+
+IMAGE_INSTALL += " \
+    gateway-edge \
+    mosquitto \
+    mosquitto-clients \
+    python3 \
+    python3-paho-mqtt \
+    python3-flask \
+    python3-sqlite3 \
+    fswebcam \
+    sqlite3 \
+    v4l-utils \
+"
+
+IMAGE_FEATURES += " \
+    ssh-server-dropbear \
+"
+
+IMAGE_ROOTFS_EXTRA_SPACE = "262144"
+```
+
+### Building the Gateway Image
+
+```bash
+cd ~/yocto/poky
+source oe-init-build-env build-rpi
+
+# Copy recipe files to the layer
+cp ~/edge-gateway/yocto/gateway-edge_1.0.bb \
+    ~/yocto/meta-siliconwit-rpi/recipes-apps/gateway-edge/
+
+mkdir -p ~/yocto/meta-siliconwit-rpi/recipes-apps/gateway-edge/files
+cp ~/edge-gateway/datalogger/gateway_datalogger.py \
+    ~/edge-gateway/dashboard/gateway_dashboard.py \
+    ~/edge-gateway/dashboard/templates/index.html \
+    ~/edge-gateway/dashboard/static/style.css \
+    ~/edge-gateway/camera/gateway_camera.py \
+    ~/edge-gateway/mqtt/mosquitto.conf \
+    ~/edge-gateway/mqtt/acl.conf \
+    ~/edge-gateway/mqtt/bridge.conf \
+    ~/edge-gateway/schema/init_db.sql \
+    ~/edge-gateway/systemd/gateway-datalogger.service \
+    ~/edge-gateway/systemd/gateway-dashboard.service \
+    ~/edge-gateway/systemd/mosquitto.service \
+    ~/yocto/meta-siliconwit-rpi/recipes-apps/gateway-edge/files/
+
+# Build the image
+bitbake siliconwit-image-gateway
+```
+
+The build adds roughly 5 to 10 minutes on top of the base sensor image build time, since it pulls in Python3, Flask, Mosquitto, and the camera utilities.
+
+## Deploying and Testing
+
+<InArticleAd />
+
+
+With the image built, follow these steps to deploy and validate the complete gateway system:
+
+<Steps>
+
+1. **Flash the SD card**
+
+   ```bash
+   cd ~/yocto/poky/build-rpi/tmp/deploy/images/raspberrypi0-2w-64/
+   bzip2 -dk siliconwit-image-gateway-raspberrypi0-2w-64.rootfs.wic.bz2
+   sudo dd if=siliconwit-image-gateway-raspberrypi0-2w-64.rootfs.wic \
+       of=/dev/sdX bs=4M status=progress conv=fsync
+   ```
+
+   Replace `/dev/sdX` with your actual SD card device (check with `lsblk`).
+
+2. **Boot the gateway and connect via SSH**
+
+   Insert the SD card into the RPi Zero 2 W and power it on. After 15 to 30 seconds, connect:
+
+   ```bash
+   ssh root@gateway-ip
+   ```
+
+   Verify all services are running:
+
+   ```bash
+   systemctl status mosquitto
+   systemctl status gateway-datalogger
+   systemctl status gateway-dashboard
+   ```
+
+3. **Configure Wi-Fi on the gateway**
+
+   ```bash
+   wpa_passphrase "YourSSID" "YourPassword" >> /etc/wpa_supplicant/wpa_supplicant.conf
+   systemctl restart wpa_supplicant
+   ```
+
+4. **Connect an ESP32 sensor node**
+
+   On your ESP32 (from the ESP32 MQTT lesson), update the broker address to point to the gateway's IP. The ESP32 firmware publishes JSON payloads like:
+
+   ```json
+   {
+       "device_id": "esp32-01",
+       "sensor": "bme280",
+       "type": "temperature",
+       "value": 24.3,
+       "unit": "C",
+       "ts": 1710000000
+   }
+   ```
+
+   The ESP32 connects to `tcp://gateway-ip:1883` and publishes to `sensor/esp32-01/temperature`, `sensor/esp32-01/humidity`, and `sensor/esp32-01/pressure`.
+
+5. **Connect an RPi Pico sensor node**
+
+   Similarly, the RPi Pico node (from the RPi Pico MQTT lesson) connects to the same broker and publishes to `sensor/pico-01/temperature` (or whichever topics you configured).
+
+6. **Verify data in the SQLite database**
+
+   ```bash
+   sqlite3 /var/lib/gateway/sensor_data.db \
+       "SELECT * FROM readings ORDER BY id DESC LIMIT 10;"
+   ```
+
+   You should see rows with timestamps, device IDs, sensor types, and values.
+
+7. **Open the web dashboard**
+
+   From any device on the same network, open a browser and navigate to:
+
+   ```
+   http://gateway-ip:5000
+   ```
+
+   You should see live charts updating every 10 seconds with data from your ESP32 and Pico nodes.
+
+8. **Trigger a camera capture**
+
+   Simulate a threshold event by publishing a high temperature value:
+
+   ```bash
+   mosquitto_pub -h localhost -u esp32-node-01 -P esp32_pass \
+       -t "sensor/esp32-01/temperature" \
+       -m '{"device_id":"esp32-01","sensor":"bme280","type":"temperature","value":50.0,"unit":"C","ts":1710001000}'
+   ```
+
+   Check that a snapshot was saved:
+
+   ```bash
+   ls -la /var/lib/gateway/snapshots/
+   ```
+
+   The events table should also have a new entry:
+
+   ```bash
+   sqlite3 /var/lib/gateway/sensor_data.db "SELECT * FROM events;"
+   ```
+
+9. **Verify cloud forwarding**
+
+   If you configured the MQTT bridge, subscribe to the cloud broker and check that messages arrive:
+
+   ```bash
+   mosquitto_sub -h mqtt.siliconwit.io -p 8883 --cafile /etc/ssl/certs/ca-certificates.crt \
+       -u your_cloud_user -P your_cloud_pass \
+       -t "gateway/rpi-01/#" -v
+   ```
+
+   Messages from local sensor topics should appear under the `gateway/rpi-01/` prefix.
+
+</Steps>
+
+## Production Hardening
+
+<InArticleAd />
+
+
+A gateway that runs unattended in the field needs additional protection against failures, attacks, and storage exhaustion. Apply these hardening measures before deploying to production.
+
+### Read-Only Root Filesystem
+
+Mount the root filesystem as read-only to prevent corruption from power loss. Use a tmpfs overlay for directories that need to be writable at runtime:
+
+```bash title="/etc/fstab additions"
+# Root filesystem: read-only
+/dev/mmcblk0p2  /        ext4  ro,noatime      0  1
+
+# Writable tmpfs overlays
+tmpfs  /tmp         tmpfs  nosuid,nodev,size=16M  0  0
+tmpfs  /var/log     tmpfs  nosuid,nodev,size=8M   0  0
+tmpfs  /run         tmpfs  nosuid,nodev,mode=755  0  0
+
+# Persistent data partition: read-write
+/dev/mmcblk0p4  /var/lib/gateway  ext4  rw,noatime,sync  0  2
+```
+
+The sensor database and snapshots live on the persistent data partition, which survives reboots and OTA updates (from the A/B scheme in Lesson 8).
+
+### Log Rotation
+
+Even with tmpfs for `/var/log`, configure journald to limit its memory usage:
+
+```ini title="/etc/systemd/journald.conf"
+[Journal]
+Storage=volatile
+RuntimeMaxUse=4M
+RuntimeMaxFileSize=1M
+MaxLevelStore=warning
+ForwardToSyslog=no
+```
+
+### MQTT Rate Limiting
+
+Prevent misbehaving or compromised sensor nodes from overwhelming the broker:
+
+```bash title="Additional mosquitto.conf settings"
+# Limit message rate per client
+max_inflight_messages 20
+max_queued_messages 100
+message_size_limit 4096
+
+# Limit connections per IP
+# (requires Mosquitto 2.x plugin or external firewall)
+```
+
+### Firewall Rules
+
+Use nftables (the modern replacement for iptables) to restrict network access:
+
+```bash title="/etc/nftables.conf"
+#!/usr/sbin/nft -f
+
+flush ruleset
+
+table inet filter {
+    chain input {
+        type filter hook input priority 0; policy drop;
+
+        # Allow established connections
+        ct state established,related accept
+
+        # Allow loopback
+        iif "lo" accept
+
+        # Allow SSH (port 22)
+        tcp dport 22 accept
+
+        # Allow MQTT (port 1883) from local network only
+        ip saddr 192.168.1.0/24 tcp dport 1883 accept
+
+        # Allow dashboard (port 5000) from local network only
+        ip saddr 192.168.1.0/24 tcp dport 5000 accept
+
+        # Allow ICMP ping
+        icmp type echo-request accept
+    }
+
+    chain forward {
+        type filter hook forward priority 0; policy drop;
+    }
+
+    chain output {
+        type filter hook output priority 0; policy accept;
+    }
+}
+```
+
+Enable the firewall:
+
+```bash
+sudo systemctl enable nftables
+sudo systemctl start nftables
+```
+
+### SSH Hardening
+
+Restrict SSH access to key-based authentication and limit connection attempts:
+
+```bash title="/etc/ssh/sshd_config additions"
+PermitRootLogin prohibit-password
+PasswordAuthentication no
+MaxAuthTries 3
+MaxSessions 2
+LoginGraceTime 30
+ClientAliveInterval 300
+ClientAliveCountMax 2
+```
+
+For additional protection, install fail2ban to block repeated failed login attempts:
+
+```bash
+# In your Yocto image, add fail2ban to IMAGE_INSTALL
+# Or on a running system:
+sudo apt install fail2ban
+```
+
+### Hardware Watchdog
+
+Enable the BCM2835 hardware watchdog to automatically reboot the system if it becomes unresponsive. The kernel module was covered in Lesson 5:
+
+```bash
+# Load the watchdog module
+modprobe bcm2835_wdt
+
+# systemd watchdog integration (already in our service files)
+# WatchdogSec=60 in the service unit tells systemd to
+# send keepalive pings and restart the service if it stops
+```
+
+For system-level watchdog (reboots the entire board if systemd itself hangs):
+
+```ini title="/etc/systemd/system.conf"
+RuntimeWatchdogSec=30
+RebootWatchdogSec=60
+```
+
+### OTA with A/B Rollback
+
+Use the A/B root filesystem scheme from Lesson 8. When deploying a gateway update:
+
+1. Write the new root filesystem to the inactive partition.
+2. Switch the U-Boot boot_slot variable.
+3. Reboot into the new partition.
+4. The gateway-datalogger service runs its self-test (connecting to MQTT, writing a test row to SQLite).
+5. If the self-test passes within 60 seconds, mark the update as confirmed.
+6. If the self-test fails or the system does not boot, the watchdog triggers a reboot and U-Boot falls back to the previous partition.
+
+This ensures that a bad update never leaves the gateway permanently offline.
+
+## What You Have Built
+
+<InArticleAd />
+
+
+<Card title="Complete Edge Gateway System" icon="star">
+Starting from bare metal in Lesson 1 and building up through eight lessons, you have now deployed a full edge gateway product. Here is every skill from the course and where it appears in this final project:
+
+**Lesson 1 (Cross-Compilation and Boot)**: The Yocto toolchain cross-compiles all gateway components for AArch64. The boot process loads the kernel and device tree that bring up the RPi Zero 2 W.
+
+**Lesson 2 (Device Trees)**: The device tree enables I2C, SPI, and UART peripherals. The USB host controller entry allows the webcam to enumerate.
+
+**Lesson 3 (Kernel Configuration)**: The custom kernel includes v4l2 for camera support, USB host drivers, networking stack, and the ext4 filesystem for the data partition.
+
+**Lesson 4 (Kernel Modules)**: The BCM2835 watchdog module and I2C bus drivers load at boot to support hardware watchdog and local sensor connections.
+
+**Lesson 5 (Userspace GPIO/I2C/SPI)**: Direct I2C access to local sensors (if connected to the gateway board) uses the sysfs and i2c-dev interfaces.
+
+**Lesson 6 (Buildroot)**: The minimal root filesystem concepts apply to keeping the gateway image lean. Buildroot can be used for rapid prototyping before moving to Yocto.
+
+**Lesson 7 (System Services)**: Every gateway component runs as a systemd service with automatic restart, watchdog, security hardening, and structured logging through journald.
+
+**Lesson 8 (Yocto and Production Images)**: The gateway is packaged as a BitBake recipe in the meta-siliconwit-rpi layer, built into a reproducible image with SDK support and A/B OTA updates.
+
+**Previous courses**: The ESP32, RPi Pico, and STM32 sensor nodes that feed data into this gateway were built in the earlier courses of this series. The RTOS course provided the real-time firmware patterns used on those nodes.
+</Card>
+
+### The Progression
+
+| Course | Role in This System |
+|--------|-------------------|
+| Embedded Programming: STM32 | Sensor node firmware, UART communication |
+| Embedded Programming: ESP32 | Wi-Fi sensor node, MQTT client |
+| Embedded Programming: RPi Pico | Wi-Fi sensor node (Pico W), MQTT client |
+| RTOS Programming | Real-time task scheduling on sensor nodes |
+| Embedded Linux with RPi (Lessons 1 to 8) | Gateway OS, services, kernel, drivers |
+| Embedded Linux with RPi (Lesson 9) | Complete gateway integration |
+
+This is the kind of project that demonstrates the full range of embedded systems engineering. The sensor nodes handle real-time data acquisition with deterministic timing. The gateway handles data aggregation, storage, visualization, and cloud connectivity with the power of Linux. Neither layer can replace the other; they work together.
+
+## Exercises
+
+<InArticleAd />
+
+
+<CardGrid>
+  <Card title="Exercise 1: Add Grafana to the Gateway" icon="pencil">
+    Replace the custom Flask dashboard with Grafana (or run both side by side). Install Grafana on the gateway image, configure it to read from the SQLite database (using the SQLite Grafana plugin), and create dashboards with alerting rules. Compare the resource usage (CPU, RAM) of Grafana versus the lightweight Flask dashboard on the RPi Zero 2 W.
+  </Card>
+  <Card title="Exercise 2: Two-Way MQTT Commands" icon="pencil">
+    Extend the gateway to send commands back to the MCU nodes. Add a `commands/#` topic tree where the dashboard can publish actuator commands (for example, turning on an LED or activating a relay). Modify the ESP32 firmware to subscribe to `commands/esp32-01/#` and execute received commands. Implement command acknowledgment so the dashboard shows whether a command was executed.
+  </Card>
+  <Card title="Exercise 3: LoRa Sensor Node Integration" icon="pencil">
+    Add an SX1276 LoRa module to the RPi Zero 2 W via SPI (using the kernel SPI driver from Lesson 5). Write a Python service that receives LoRa packets from a remote sensor node (placed outside Wi-Fi range) and republishes the data as MQTT messages on the local broker. This extends the gateway's range beyond Wi-Fi coverage.
+  </Card>
+  <Card title="Exercise 4: Containerized Gateway Services" icon="pencil">
+    Package the data logger, dashboard, and camera services as Docker containers (or Podman on the Yocto image). Create a docker-compose.yml that brings up all services with proper networking and volume mounts. Compare the startup time, memory overhead, and ease of updates between the containerized approach and the native systemd approach used in this lesson.
+  </Card>
+</CardGrid>
+
+<EmbeddedLinuxRpiComments />
+
+
+
+<InArticleAd />
+<TawkWidget />
+<Copyright />
