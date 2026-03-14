@@ -12,6 +12,8 @@ sidebar:
 ![License](https://img.shields.io/badge/license-MIT-blue)
 ![Contributors Welcome](https://img.shields.io/badge/contributors-welcome-orange)
 
+**Read this course at:** [https://siliconwit.com/education/embedded-linux-rpi/](https://siliconwit.com/education/embedded-linux-rpi/)
+
 A practical course on embedded Linux development using the Raspberry Pi. Topics range from cross-compilation and kernel builds through Buildroot and Yocto, culminating in an edge gateway that bridges MCU sensor networks.
 
 ## Lessons
