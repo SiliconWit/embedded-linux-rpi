@@ -77,6 +77,45 @@ Linux provides two fundamentally different approaches to interacting with hardwa
 
 For a BME280 sensor that updates a few times per second, or an LED that toggles on a button press, userspace access is the right choice. You get simpler code, safer operation, and faster development cycles. The kernel IIO driver (loaded via the device tree overlay from Lesson 3) handles the low-level register protocol; your userspace code reads the processed values.
 
+```text
+  Linux Userspace Hardware Access
+  ──────────────────────────────────────────
+  Your C Application
+    │          │           │
+    ▼          ▼           ▼
+  libgpiod  /dev/i2c-1  /dev/spidev0.0
+  (GPIO)    (I2C ioctl) (SPI ioctl)
+    │          │           │
+    ▼          ▼           ▼
+  ┌──────────────────────────────────────┐
+  │          Linux Kernel                 │
+  │  gpiochip driver  i2c-bcm  spi-bcm  │
+  └──────────────────────────────────────┘
+    │          │           │
+    ▼          ▼           ▼
+  GPIO pins   SDA/SCL    MOSI/MISO/CLK
+```
+
+```text
+  GPIO Event Detection (libgpiod)
+  ──────────────────────────────────────────
+  Button ──► GPIO17 (pull-up, active-low)
+                │
+                ▼
+  gpiod_line_event_wait()  ◄── blocks here
+                │
+                │ falling edge detected
+                ▼
+  gpiod_line_event_read()
+                │
+                ├──► Toggle LED (GPIO27)
+                ├──► Read BME280 via I2C
+                └──► Log: "23.5C, 65%, 1013hPa"
+
+  No polling loop needed. The kernel wakes
+  your process only when the button fires.
+```
+
 For this lesson, we will interact with hardware through three userspace interfaces: **libgpiod** for GPIO, **i2c-dev** for I2C, and **spidev** for SPI.
 
 ---

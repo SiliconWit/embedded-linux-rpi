@@ -67,10 +67,55 @@ A complete Yocto-based Linux distribution for the Raspberry Pi Zero 2 W containi
 | siliconwit-image-sensor.bb | Image recipe pulling in all components |
 | siliconwit-rpi.conf | Machine configuration overrides |
 
+```text
+  A/B OTA Partition Layout
+  ──────────────────────────────────────────
+  microSD Card:
+  ┌──────────────────────────────────────┐
+  │ boot (FAT32, 64 MB)                 │
+  │  kernel, DTBs, config.txt, U-Boot   │
+  ├──────────────────────────────────────┤
+  │ rootfsA (ext4, 256 MB) ◄── active   │
+  │  current running system              │
+  ├──────────────────────────────────────┤
+  │ rootfsB (ext4, 256 MB) ◄── standby  │
+  │  OTA writes new image here          │
+  ├──────────────────────────────────────┤
+  │ data (ext4, remaining space)         │
+  │  persistent: logs, config, database  │
+  └──────────────────────────────────────┘
+
+  After OTA: U-Boot switches active slot
+  from A to B. Rollback on boot failure.
+```
+
 ## What is the Yocto Project?
 
 <InArticleAd />
 
+
+```text
+  Yocto Layer Architecture
+  ──────────────────────────────────────────
+  ┌─────────────────────────────────────┐
+  │ meta-siliconwit-rpi (your layer)    │
+  │  recipes: sensor-monitord, image    │
+  ├─────────────────────────────────────┤
+  │ meta-raspberrypi (BSP layer)        │
+  │  machine config, bootloader, kernel │
+  ├─────────────────────────────────────┤
+  │ meta-openembedded (extra packages)  │
+  │  libraries, tools, networking       │
+  ├─────────────────────────────────────┤
+  │ poky (core: meta + meta-poky)       │
+  │  gcc, glibc, busybox, systemd       │
+  └─────────────────────────────────────┘
+         │
+         ▼ BitBake processes all layers
+  ┌─────────────────────────────────────┐
+  │  Output: rootfs image + SDK + .wic  │
+  └─────────────────────────────────────┘
+```
 
 The Yocto Project is a collaboration that provides tools and metadata for building custom Linux distributions for embedded systems. Rather than shipping a pre-built distribution, you define exactly what goes into your image through recipes (build instructions), layers (organized collections of recipes), and configuration files.
 

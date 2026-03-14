@@ -80,7 +80,60 @@ In the previous lessons, your code ran in userspace, where each process has its 
   </Card>
 </CardGrid>
 
+```text
+  Kernel Module Load/Unload Flow
+  ──────────────────────────────────────────
+  insmod mydevice.ko
+    │
+    ▼
+  module_init()
+    ├──► alloc_chrdev_region()  /dev/mydevice
+    ├──► class_create()
+    ├──► device_create()
+    ├──► cdev_add()             register fops
+    └──► gpio_request()         claim GPIO pins
+         │
+         ▼
+  Module running, userspace can
+  open/read/write /dev/mydevice
+
+  rmmod mydevice
+    │
+    ▼
+  module_exit()
+    ├──► gpio_free()
+    ├──► cdev_del()
+    ├──► device_destroy()
+    └──► unregister_chrdev_region()
+```
+
 Because a buggy kernel module can crash or corrupt the entire system, always develop on a test board (your Pi Zero 2 W) rather than on your development workstation. Keep a serial console connected so you can see kernel panic messages even when the system locks up.
+
+```text
+  Character Device Data Flow
+  ──────────────────────────────────────────
+  Userspace              Kernel Module
+  ─────────              ─────────────
+  fd = open("/dev/mydevice")
+       │                 fops.open()
+       ▼
+  write(fd, "101010")
+       │                 fops.write()
+       │                   │
+       │                   ▼
+       │                 copy_from_user()
+       │                 parse pattern
+       │                 set GPIO pins
+       ▼
+  read(fd, buf, 64)
+       │                 fops.read()
+       │                   │
+       │                   ▼
+       │                 copy_to_user()
+       │                 return pattern + count
+       ▼
+  close(fd)              fops.release()
+```
 
 ## Module Skeleton
 

@@ -60,10 +60,60 @@ A two-process system: a sensor daemon (sensor-monitord) that reads the BME280 ev
 | Dependency ordering | After=i2c-dev.service, Requires=... |
 | Logging | StandardOutput=journal, structured fields |
 
+```text
+  Systemd Service Lifecycle
+  ──────────────────────────────────────────
+  systemctl start sensor-monitord
+    │
+    ▼
+  [Inactive] ──► [Activating] ──► [Active]
+                                     │
+                      watchdog ping  │ WatchdogSec=15
+                      every 10s ◄────┘
+                                     │
+                      crash / kill   │
+                                     ▼
+                                 [Failed]
+                                     │
+                      Restart=on-failure
+                      RestartSec=3   │
+                                     ▼
+                                 [Activating]
+                                     │
+                                     ▼
+                                 [Active] (recovered)
+```
+
 ## Why systemd for Embedded?
 
 <InArticleAd />
 
+
+```text
+  IPC: Daemon + Client via Unix Socket
+  ──────────────────────────────────────────
+  sensor-monitord            sensor-query
+  (daemon, always running)   (on-demand client)
+  ─────────────────          ──────────────
+  BME280 read (1 Hz)
+       │
+       ▼
+  Ring buffer (1000 readings)
+       │
+       ├──► /dev/watchdog (kick every 10s)
+       │
+       └──► Unix socket
+            /run/sensor-monitor.sock
+                 │
+                 │ connect()
+                 ◄─────────────── sensor-query
+                 │
+                 │ "get_latest"
+                 ├────────────────► parse cmd
+                 │
+                 │ JSON response
+                 ◄──────────────── send result
+```
 
 Older init systems like SysVinit and BusyBox init start services sequentially using shell scripts. This works for simple cases, but production embedded systems need capabilities that shell scripts cannot reliably provide.
 

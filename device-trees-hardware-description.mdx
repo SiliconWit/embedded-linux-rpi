@@ -75,6 +75,35 @@ That data structure is the **device tree**.
   </Card>
 </CardGrid>
 
+```text
+  Device Tree: Base + Overlay
+  ──────────────────────────────────────────
+  bcm2710-rpi-zero-2-w.dts   (base, from SoC)
+  ┌───────────────────────────────┐
+  │ / {                           │
+  │   cpus { cpu@0 { ... }; };   │
+  │   soc {                      │
+  │     i2c1: i2c@7e804000 {     │
+  │       status = "disabled";   │
+  │     };                       │
+  │   };                         │
+  │ };                           │
+  └───────────────────────────────┘
+         +
+  my-overlay.dts                 (your overlay)
+  ┌───────────────────────────────┐
+  │ &i2c1 {                      │
+  │   status = "okay";           │
+  │   bme280@76 {                │
+  │     compatible = "bosch,..."; │
+  │     reg = <0x76>;            │
+  │   };                         │
+  │ };                           │
+  └───────────────────────────────┘
+         =
+  Final merged tree at boot
+```
+
 The device tree originated in Open Firmware (IEEE 1275) and was adopted by the Linux ARM community around 2011 to replace the explosion of board-specific C files in `arch/arm/mach-*`.
 
 <Card title="Key Terminology" icon="information">
@@ -90,6 +119,25 @@ The device tree originated in Open Firmware (IEEE 1275) and was adopted by the L
 | Phandle | A numeric reference that lets one node point to another |
 
 </Card>
+
+```text
+  DTS Compilation and Loading
+  ──────────────────────────────────────────
+  my-overlay.dts  (text, you edit this)
+       │
+       ▼
+  dtc -I dts -O dtb -o my-overlay.dtbo
+       │
+       ▼
+  my-overlay.dtbo (binary, kernel reads this)
+       │
+       │  config.txt: dtoverlay=my-overlay
+       ▼
+  Bootloader merges overlay with base DTB
+       │
+       ▼
+  Kernel sees merged tree at /proc/device-tree
+```
 
 ---
 

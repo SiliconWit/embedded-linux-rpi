@@ -64,6 +64,36 @@ A complete cross-compiled "hello from custom Linux" application that runs automa
 
 When you press the power button on a Raspberry Pi Zero 2 W, the board does not jump straight into Linux. Instead, a carefully orchestrated chain of events unfolds, each stage handing control to the next. Understanding this chain is essential because, later in this course, you will modify nearly every link in it.
 
+```text
+  RPi Zero 2 W Boot Sequence
+  ──────────────────────────────────────────
+  Power On
+    │
+    ▼
+  ┌─────────────────┐
+  │ GPU ROM (SoC)   │ Fixed in silicon
+  │ Loads bootcode  │
+  └────────┬────────┘
+           ▼
+  ┌─────────────────┐
+  │ start.elf (GPU) │ Reads config.txt
+  │ Init SDRAM      │ Loads kernel + DTB
+  │ Load kernel     │
+  └────────┬────────┘
+           ▼
+  ┌─────────────────┐
+  │ Linux Kernel    │ ARM cores released
+  │ Init MMU, CPUs  │ Mount rootfs
+  │ Probe hardware  │
+  └────────┬────────┘
+           ▼
+  ┌─────────────────┐
+  │ /sbin/init      │ PID 1
+  │ (BusyBox or     │ Start services
+  │  systemd)       │ Launch shell
+  └─────────────────┘
+```
+
 The RPi Zero 2 W uses the Broadcom BCM2710A1 SoC, which contains both a VideoCore IV GPU and a quad-core ARM Cortex-A53 CPU. Critically, it is the GPU that runs first, not the CPU. The ARM cores remain in reset until the GPU firmware explicitly releases them.
 
 <Steps>
@@ -92,6 +122,23 @@ The Broadcom SoC was originally designed for multimedia applications where the G
 
 <InArticleAd />
 
+
+```text
+  Cross-Compilation: Host vs Target
+  ──────────────────────────────────────────
+  Host PC (x86_64)          Target (AArch64)
+  ─────────────────         ────────────────
+  hello.c                   RPi Zero 2 W
+    │                       Cortex-A53
+    ▼
+  aarch64-linux-gnu-gcc     Cannot run x86
+    │                       binaries!
+    ▼
+  hello (AArch64 ELF) ─────► Runs here ✓
+    │
+    ✗ Cannot run
+      on host
+```
 
 Cross-compilation means compiling code on one machine (the **host**) to produce executables for a different machine (the **target**). Your host is an x86_64 PC running Ubuntu or Debian. Your target is the Raspberry Pi Zero 2 W running an AArch64 (64-bit ARM) processor. You cannot run x86 binaries on ARM or vice versa, so you need a special compiler that runs on x86 but produces ARM machine code.
 

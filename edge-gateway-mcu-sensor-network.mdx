@@ -27,6 +27,25 @@ import EmbeddedLinuxRpiComments from '../../../../components/embedded-linux-rpi/
 
 The previous eight lessons taught you to cross-compile, build custom kernels, write device trees, develop kernel modules, create Buildroot and Yocto images, and manage system services. In this final lesson, you combine all of those skills into a single deployable product: an edge gateway that collects sensor data from the MCU nodes you built in the ESP32, RPi Pico, and STM32 courses, stores it locally, serves a live dashboard, and forwards selected data to the cloud. This project does things that microcontrollers cannot handle and does them more reliably than stock Raspberry Pi OS ever could in a deployed environment. #EdgeGateway #EmbeddedLinux #IoT
 
+```text
+  Edge Gateway Architecture
+  ──────────────────────────────────────────
+  Sensor Nodes            RPi Zero 2 W
+  ────────────           ──────────────────
+  ┌──────────┐  WiFi     ┌──────────────┐
+  │  ESP32   ├──MQTT────►│  Mosquitto   │
+  │  BME280  │           │  (broker)    │
+  └──────────┘           └──────┬───────┘
+  ┌──────────┐  WiFi            │
+  │  Pico W  ├──MQTT────►      ├──► SQLite DB
+  │  Light   │                  ├──► Flask Dashboard
+  └──────────┘                  ├──► Camera trigger
+  ┌──────────┐  WiFi            └──► Cloud bridge
+  │  STM32+  ├──MQTT────►           (MQTT fwd)
+  │  ESP-01  │
+  └──────────┘
+```
+
 ## What We Are Building
 
 <Card title="Edge Gateway: RPi Zero 2 W as MCU Network Hub" icon="star">
@@ -57,6 +76,30 @@ A complete edge gateway running on a custom Yocto image for the Raspberry Pi Zer
 | gateway-dashboard | 5000 | Flask web server with live charts and REST API |
 | gateway-camera | (triggered) | Captures JPEG snapshots on threshold events |
 | mosquitto-bridge | (outbound) | Forwards selected topics to cloud broker |
+
+```text
+  Gateway Data Flow
+  ──────────────────────────────────────────
+  MQTT msg in ──► Mosquitto (port 1883)
+                      │
+         ┌────────────┼────────────┐
+         ▼            ▼            ▼
+  gateway-      gateway-     mosquitto-
+  datalogger    dashboard    bridge
+    │              │              │
+    ▼              ▼              ▼
+  SQLite DB    Flask+Chart.js  Cloud broker
+  (local       (port 5000)    (remote MQTT)
+   history)        │
+    │              ▼
+    │           Browser
+    │
+    ▼ threshold exceeded?
+  gateway-camera
+    │
+    ▼
+  JPEG snapshot saved
+```
 
 ## Why This Cannot Run on a Microcontroller
 

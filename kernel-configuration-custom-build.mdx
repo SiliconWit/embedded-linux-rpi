@@ -58,12 +58,54 @@ A custom-compiled Linux kernel for the Raspberry Pi Zero 2 W, configured with on
 | Virtualization | CONFIG_VIRTUALIZATION | Not applicable |
 | Multimedia (V4L2) | CONFIG_MEDIA_SUPPORT | No camera in this lesson |
 
+```text
+  Menuconfig Decision: Built-in vs Module
+  ──────────────────────────────────────────
+  [*] = Built-in (compiled into kernel)
+      + Available immediately at boot
+      + No insmod step needed
+      - Larger kernel image
+
+  [M] = Module (separate .ko file)
+      + Loaded only when needed
+      + Smaller kernel image
+      - Requires module load step
+
+  [ ] = Disabled (not compiled at all)
+      + Saves flash and RAM
+      - Cannot be used without recompiling
+
+  For fast boot: use [*] for essential
+  drivers, [ ] for everything else.
+```
+
 ## Cloning the Kernel Source
 
 <InArticleAd />
 
 
 The Raspberry Pi Foundation maintains a fork of the Linux kernel with patches and drivers specific to Broadcom SoCs. This is the kernel you should use for any Pi project, as it includes support for hardware that has not yet been merged into the mainline kernel.
+
+```text
+  Kernel Source Tree (simplified)
+  ──────────────────────────────────────────
+  rpi-linux/
+  ├── arch/arm64/       ARM64 platform code
+  │   ├── boot/dts/     Device tree sources
+  │   └── configs/      defconfig files
+  ├── drivers/          All device drivers
+  │   ├── gpio/
+  │   ├── i2c/
+  │   ├── spi/
+  │   └── usb/
+  ├── kernel/           Core scheduler, IPC
+  ├── mm/               Memory management
+  ├── net/              Networking stack
+  ├── fs/               Filesystems
+  ├── include/          Header files
+  ├── Kconfig           Top-level config
+  └── Makefile          Top-level build
+```
 
 Clone the repository with the `rpi-6.6.y` branch:
 

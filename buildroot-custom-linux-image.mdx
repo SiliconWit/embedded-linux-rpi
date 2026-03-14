@@ -64,6 +64,29 @@ A self-contained Linux image under 32 MB that boots the Raspberry Pi Zero 2 W di
 
 Buildroot is an open-source build system that generates a complete embedded Linux image (cross-compilation toolchain, kernel, bootloader, and root filesystem) from source. You describe what you want through a configuration file, run `make`, and get a flashable image. Unlike Yocto (which uses a layer-based architecture with its own package format, recipe language, and extensive caching), Buildroot is simpler and faster to learn. A first Buildroot image can be ready in under an hour. The trade-off is that Buildroot offers less flexibility for large-scale product lines with multiple hardware variants and long-term maintenance. For a dedicated sensor node or single-purpose embedded device, Buildroot is an excellent fit.
 
+```text
+  Buildroot Build Pipeline
+  ──────────────────────────────────────────
+  make menuconfig
+    │
+    ▼
+  .config (target arch, packages, kernel)
+    │
+    ▼
+  make
+    │
+    ├──► Download sources ──► /dl/
+    ├──► Build toolchain  ──► /host/
+    ├──► Build kernel     ──► Image.gz
+    ├──► Build BusyBox    ──► rootfs utils
+    ├──► Build packages   ──► your app
+    └──► Generate image   ──► sdcard.img
+                               │
+                               ▼
+                          dd to microSD
+                          Boot the Pi!
+```
+
 | Feature | Buildroot | Yocto |
 |---------|-----------|-------|
 | Learning curve | Low (Kconfig menus) | Steep (BitBake, layers, recipes) |
@@ -71,6 +94,28 @@ Buildroot is an open-source build system that generates a complete embedded Linu
 | Package count | ~2,800 | ~10,000+ (via layers) |
 | Output | Single image | Image + SDK + package feeds |
 | Best for | Single-purpose devices | Complex product families |
+
+```text
+  Buildroot Output Directory
+  ──────────────────────────────────────────
+  output/
+  ├── build/           Extracted + compiled
+  │   ├── busybox-*/   sources for each
+  │   ├── linux-*/     selected package
+  │   └── sensor-monitor-*/
+  ├── host/            Cross-toolchain +
+  │   └── bin/         build tools (runs
+  │       └── aarch64- on your x86 PC)
+  │           linux-gnu-gcc
+  ├── images/          Final output
+  │   ├── Image.gz     Kernel
+  │   ├── rootfs.ext4  Root filesystem
+  │   └── sdcard.img   Flashable image
+  └── target/          Staging rootfs
+      ├── bin/         (becomes / on target)
+      ├── etc/
+      └── usr/
+```
 
 ## Downloading and Initial Configuration
 
