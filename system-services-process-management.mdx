@@ -25,51 +25,44 @@ import { Card, CardGrid, Badge, Steps, LinkButton, FileTree } from '@astrojs/sta
 
 import EmbeddedLinuxRpiComments from '../../../../components/embedded-linux-rpi/EmbeddedLinuxRpiComments.astro';
 
-A sensor reading application that runs in a terminal is fine for development, but a deployed embedded system needs its software to start at boot, recover from crashes, log diagnostic data, and communicate with other processes reliably. In this lesson, you will convert the sensor application from previous lessons into a proper Linux daemon managed by systemd. The daemon reads BME280 data on a configurable interval, feeds the hardware watchdog to prove it is alive, writes structured log entries through journald, and serves real-time readings to a client application over a Unix domain socket. You will also patch the kernel with PREEMPT_RT and configure real-time scheduling priorities for time-sensitive tasks. #Systemd #ProcessManagement #EmbeddedDaemon
+A sensor program that you start by hand in a terminal stops when the terminal closes. It does not return after a power cut. If it crashes at night in a pump house, it stays dead until somebody travels there, and if it hangs, nothing notices at all. A device in the field needs a program that starts at boot, is started again when it fails, and keeps a record of what happened. In this lesson you turn the BME280 sensor reader into a daemon (a program that runs in the background with no terminal) managed by systemd, the service manager of most Linux systems. The daemon proves to a watchdog that it is alive, writes its log through journald, and gives its readings to a client program over a socket. At the end you patch the kernel with PREEMPT_RT for tasks where timing matters. #Systemd #ProcessManagement #EmbeddedDaemon
 
 ## What We Are Building
 
 <Card title="Systemd-Managed Sensor Daemon with IPC" icon="star">
-A two-process system: a sensor daemon (sensor-monitord) that reads the BME280 every second, maintains a shared-memory ring buffer of recent readings, kicks the hardware watchdog, and listens on a Unix socket; and a client tool (sensor-query) that connects to the socket to retrieve the latest readings, request history, or change the sampling interval. Both processes are managed by systemd unit files with dependency ordering, resource limits, and automatic restart policies.
+Two programs. The sensor daemon (sensor-monitord) reads the BME280 every second, keeps the recent readings in memory, kicks the hardware watchdog, and listens for requests. The client tool (sensor-query) asks the daemon for the latest reading or the history, or changes the sampling interval. The way two programs exchange data is called IPC (inter-process communication). systemd starts the daemon at boot, limits its memory and processor time, and starts it again after a failure.
 </Card>
 
 **System specifications:**
 
 | Parameter | Value |
 |-----------|-------|
-| Daemon name | sensor-monitord |
-| Client tool | sensor-query |
-| Init system | systemd |
 | Watchdog | Hardware watchdog (/dev/watchdog), 15-second timeout |
 | IPC (primary) | Unix domain socket (/run/sensor-monitor.sock) |
 | IPC (secondary) | POSIX shared memory ring buffer (recent 1000 readings) |
-| Logging | sd-journal API (structured key-value fields) |
 | Scheduling | SCHED_FIFO priority 50 (with PREEMPT_RT kernel) |
-| Restart policy | on-failure, 3-second delay, max 5 retries in 60 seconds |
+| Restart policy | on-failure, 3-second delay, max 5 starts in 60 seconds |
 | Resource limits | MemoryMax=32M, CPUQuota=25% |
 
-### Systemd Unit Features
+## Why systemd for Embedded?
 
-| Feature | Implementation |
-|---------|---------------|
-| Auto-start at boot | WantedBy=multi-user.target |
-| Watchdog integration | WatchdogSec=15 with sd_notify |
-| Restart on crash | Restart=on-failure, RestartSec=3 |
-| Resource capping | MemoryMax, CPUQuota in [Service] |
-| Socket activation | sensor-monitor.socket unit (optional) |
-| Dependency ordering | After=i2c-dev.service, Requires=... |
-| Logging | StandardOutput=journal, structured fields |
+<InArticleAd />
+
+
+On a microcontroller, `main()` starts at reset and nothing else exists. On Linux the kernel starts one program, the init system, and that program starts all the others. A service is a program that the init system starts and keeps running. An init system that also watches its services is called a service manager.
+
+BusyBox init, which you used in the Buildroot image, runs numbered shell scripts one after another and does nothing more. If your program crashes an hour later, it stays dead. If it starts before the I2C device exists, it fails at boot. You can write shell code for each case, but that is new code with its own faults. systemd has these functions built in, and you ask for each with one line in a settings file.
+
+While the daemon is active it must report every few seconds that it is alive. A crash or a missed report moves it to failed, and systemd starts it again after 3 seconds.
 
 ```text
-  Systemd Service Lifecycle
-  ──────────────────────────────────────────
   systemctl start sensor-monitord
     │
     ▼
   [Inactive] ──► [Activating] ──► [Active]
                                      │
                       watchdog ping  │ WatchdogSec=15
-                      every 10s ◄────┘
+                      every 5 s ◄────┘
                                      │
                       crash / kill   │
                                      ▼
@@ -78,53 +71,17 @@ A two-process system: a sensor daemon (sensor-monitord) that reads the BME280 ev
                       Restart=on-failure
                       RestartSec=3   │
                                      ▼
-                                 [Activating]
-                                     │
-                                     ▼
-                                 [Active] (recovered)
+                                 [Activating] ──► [Active]
 ```
-
-## Why systemd for Embedded?
-
-<InArticleAd />
-
-
-```text
-  IPC: Daemon + Client via Unix Socket
-  ──────────────────────────────────────────
-  sensor-monitord            sensor-query
-  (daemon, always running)   (on-demand client)
-  ─────────────────          ──────────────
-  BME280 read (1 Hz)
-       │
-       ▼
-  Ring buffer (1000 readings)
-       │
-       ├──► /dev/watchdog (kick every 10s)
-       │
-       └──► Unix socket
-            /run/sensor-monitor.sock
-                 │
-                 │ connect()
-                 ◄─────────────── sensor-query
-                 │
-                 │ "get_latest"
-                 ├────────────────► parse cmd
-                 │
-                 │ JSON response
-                 ◄──────────────── send result
-```
-
-Older init systems like SysVinit and BusyBox init start services sequentially using shell scripts. This works for simple cases, but production embedded systems need capabilities that shell scripts cannot reliably provide.
 
 <CardGrid>
   <Card title="systemd Advantages" icon="approve-check">
-    - **Dependency management**: declare that your daemon requires I2C to be available, and systemd handles ordering automatically
-    - **Socket activation**: systemd listens on your daemon's socket and starts the daemon only when a client connects, saving memory on idle systems
-    - **Resource control**: set hard memory and CPU limits per service using cgroups, preventing a runaway process from starving the rest of the system
-    - **Watchdog integration**: systemd monitors your daemon's heartbeat and restarts it (or reboots the board) if the heartbeat stops
-    - **Structured logging**: journald captures log entries with metadata fields that you can query and filter programmatically
-    - **Parallel startup**: independent services start simultaneously, reducing boot time
+    - **Dependency management**: you declare that your daemon needs the I2C device, and systemd starts things in the right order
+    - **Socket activation**: systemd listens on your daemon's socket and starts the daemon only when a client connects
+    - **Resource control**: a memory and a CPU limit for each service, enforced by the kernel through cgroups (control groups), so one faulty process cannot take everything
+    - **Watchdog integration**: systemd expects a regular heartbeat from your daemon and restarts it if the heartbeat stops
+    - **Structured logging**: journald stores each log entry with named fields that you can search
+    - **Parallel startup**: services that do not depend on each other start at the same time
   </Card>
   <Card title="SysVinit / BusyBox init" icon="warning">
     - Sequential startup (slow boot)
@@ -136,7 +93,7 @@ Older init systems like SysVinit and BusyBox init start services sequentially us
   </Card>
 </CardGrid>
 
-For Buildroot images (Lesson 6), BusyBox init is the default and makes sense for minimal systems. Yocto (Lesson 8) and Raspberry Pi OS both use systemd. This lesson targets systemd because the sensor daemon needs watchdog support, automatic restart, resource limits, and structured logging.
+BusyBox init is still a good choice for a minimal Buildroot image. Raspberry Pi OS uses systemd, and so does the Yocto image built later in this course.
 
 ## Project Directory Structure
 
@@ -167,11 +124,16 @@ cd ~/rpi-sensor-daemon
 <InArticleAd />
 
 
-Both the daemon and client share a simple text-based protocol over Unix domain sockets. Define the constants in a shared header.
+Two separate programs must agree on where to meet and what to say. If each kept its own copy of a path or a data layout, the copies would one day differ. So both include one header file. It names two meeting places:
+
+- A **Unix domain socket** is a connection between two programs on the same machine. Its address is a file path, not a network address.
+- **Shared memory** is a block of RAM that several programs can see at the same time. Here it holds a **ring buffer**: a fixed array of 1000 readings in which the newest reading replaces the oldest.
 
 ```c title="src/sensor-protocol.h"
 #ifndef SENSOR_PROTOCOL_H
 #define SENSOR_PROTOCOL_H
+
+#include <stdint.h>
 
 #define SENSOR_SOCK_PATH    "/run/sensor-monitor.sock"
 #define SHM_NAME            "/sensor-ringbuf"
@@ -202,20 +164,51 @@ struct sensor_ring {
 #endif /* SENSOR_PROTOCOL_H */
 ```
 
-The protocol is intentionally simple: the client sends a text command terminated by a newline, and the daemon responds with text. This makes it easy to test with tools like `socat` or `nc`.
+The client sends a text command that ends with a newline, and the daemon answers with text. Plain text can be tested by hand with tools like `socat` or `nc`.
 
 ## The Sensor Daemon (sensor-monitord)
 
 <InArticleAd />
 
 
-This is the main daemon process. It performs five tasks in a single event loop:
+The daemon does five tasks in one loop:
 
-1. Reads the BME280 sensor over I2C at a configurable interval
+1. Reads the BME280 sensor over I2C at an interval you can set
 2. Stores readings in a POSIX shared memory ring buffer
 3. Listens on a Unix domain socket for client connections
 4. Feeds the hardware watchdog to prove it is alive
 5. Sends sd_notify heartbeats so systemd knows it is healthy
+
+```text
+  sensor-monitord (always running)
+  ─────────────────
+  BME280 read (1 Hz)
+       │
+       ▼
+  Ring buffer (1000 readings)
+       │
+       ├──► /dev/watchdog (kick every 5 s)
+       │
+       └──► Unix socket
+            /run/sensor-monitor.sock
+```
+
+A request from the client is one short conversation over that socket:
+
+```text
+  sensor-monitord              sensor-query
+  (listens on socket)          (runs on demand)
+       │                            │
+       │ ◄─────── connect() ────────┤
+       │                            │
+       │ ◄─────── "latest" ─────────┤
+       │                            │
+       ├──────── text reply ───────►│
+       │                            │
+     close                        print
+```
+
+About half of the long listing is the BME280 arithmetic of the Buildroot package. Read `main()` at the end first. Its loop repeats about every 50 ms. Each pass answers a client if one is waiting, takes a sample if the interval has passed, and kicks both watchdogs if 5 seconds have passed.
 
 ```c title="src/sensor-monitord.c" collapse={1-12}
 /*
@@ -263,6 +256,9 @@ This is the main daemon process. It performs five tasks in a single event loop:
 #define BME280_REG_CONFIG   0xF5
 #define BME280_REG_DATA     0xF7
 #define BME280_CHIP_ID      0x60
+
+/* Watchdog kick period: well inside the 15 s watchdog timeouts */
+#define WATCHDOG_KICK_MS    5000
 
 /* Calibration data storage */
 struct bme280_calib {
@@ -334,7 +330,7 @@ static int i2c_read_bytes(int fd, uint8_t reg, uint8_t *buf, int len)
  * ---------------------------------------------------------------- */
 static int bme280_init(const char *i2c_dev)
 {
-    uint8_t id;
+    uint8_t id = 0;
     uint8_t cal1[26], cal2[7];
 
     i2c_fd = open(i2c_dev, O_RDWR);
@@ -688,7 +684,7 @@ int main(int argc, char *argv[])
 {
     uint64_t watchdog_usec = 0;
     int wd_enabled;
-    struct timespec last_sample, now;
+    struct timespec last_sample, last_kick, now;
 
     install_signal_handlers();
 
@@ -723,6 +719,7 @@ int main(int argc, char *argv[])
     sd_notify(0, "READY=1\nSTATUS=Monitoring BME280 sensor");
 
     clock_gettime(CLOCK_MONOTONIC, &last_sample);
+    last_kick = last_sample;
 
     sd_journal_send("MESSAGE=sensor-monitord started, interval=%d ms",
                     sample_interval_ms,
@@ -779,6 +776,14 @@ int main(int argc, char *argv[])
                 sd_journal_print(LOG_WARNING, "BME280 read failed");
             }
 
+            last_sample = now;
+        }
+
+        /* Kick both watchdogs every 5 s. This is separate from sampling,
+           so a long sample interval cannot starve the 15 s watchdogs. */
+        long since_kick_ms = (now.tv_sec - last_kick.tv_sec) * 1000
+                           + (now.tv_nsec - last_kick.tv_nsec) / 1000000;
+        if (since_kick_ms >= WATCHDOG_KICK_MS) {
             /* Kick hardware watchdog */
             watchdog_kick();
 
@@ -786,7 +791,7 @@ int main(int argc, char *argv[])
             if (wd_enabled > 0)
                 sd_notify(0, "WATCHDOG=1");
 
-            last_sample = now;
+            last_kick = now;
         }
     }
 
@@ -809,15 +814,18 @@ int main(int argc, char *argv[])
 
 Key design decisions in this daemon:
 
-- **Non-blocking socket with select()**: the main loop checks for both client connections and sensor timing without blocking on either one. The 50ms select timeout keeps the loop responsive.
-- **Atomic ring buffer writes**: the shared memory ring buffer uses `_Atomic` fields so the client tool can read it without a lock (single writer, multiple readers pattern).
+- **Non-blocking socket with select()**: `select()` waits for a client for at most 50 ms and then returns. So the loop never stops at one task while another is due.
+- **Atomic ring buffer writes**: the index fields are `_Atomic`, which means a reader never sees a half-written index. One writer and several readers can then share the buffer without a lock.
 - **Magic close on watchdog**: writing `'V'` before closing `/dev/watchdog` tells the kernel to stop the watchdog timer. Without this, the board reboots after a clean shutdown.
-- **sd_notify readiness**: the daemon calls `sd_notify(0, "READY=1")` only after all subsystems are initialized. systemd waits for this signal before marking the service as "active."
+- **Watchdog kicks on their own 5-second timer**: the client may set the sample interval as high as 60 seconds, which is longer than the 15-second watchdog timeouts, so the kicks must not depend on the sampling step.
+- **sd_notify readiness**: the daemon calls `sd_notify(0, "READY=1")` only after the sensor, the shared memory and the socket are ready. systemd waits for this message before it marks the service as "active."
 
 ## The Makefile
 
 <InArticleAd />
 
+
+The Makefile builds both programs with the cross-compiler. Only the daemon links the systemd library.
 
 ```makefile title="src/Makefile"
 CC = aarch64-linux-gnu-gcc
@@ -847,7 +855,7 @@ make
 ```
 
 <Card title="Cross-compilation Note" icon="information">
-The daemon links against libsystemd (`-lsystemd`). You need the aarch64 version of this library in your cross-compilation sysroot. If you built the kernel and root filesystem with Buildroot (Lesson 6) or have a Raspberry Pi OS sysroot, the library should already be available. Alternatively, install `libsystemd-dev:arm64` in a multiarch setup.
+The daemon links against libsystemd (`-lsystemd`). You need the aarch64 version of this library in your cross-compilation sysroot (the copy of the target's libraries and headers that the compiler links against). A Raspberry Pi OS sysroot already has it. The Buildroot image of this course uses BusyBox init, so its sysroot has no libsystemd unless you change the init system to systemd. Another way is to install `libsystemd-dev:arm64` in a multiarch setup.
 </Card>
 
 ## The Client Tool (sensor-query)
@@ -855,7 +863,7 @@ The daemon links against libsystemd (`-lsystemd`). You need the aarch64 version 
 <InArticleAd />
 
 
-The client connects to the daemon's Unix socket, sends a command, and prints the response. It is a standalone binary that can be run manually or from scripts and cron jobs.
+The client connects to the daemon's Unix socket, sends a command, and prints the response. Notice the order `socket()`, `connect()`, `send()`, `recv()`: every socket client has these four calls.
 
 ```c title="src/sensor-query.c" collapse={1-8}
 /*
@@ -967,7 +975,7 @@ sensor-query interval 2000
 <InArticleAd />
 
 
-The unit file tells systemd how to manage the daemon: when to start it, how to monitor it, what to do when it fails, and what resources it may consume.
+A unit file is the settings file for one service. It has three sections: `[Unit]` says what the service is and what must exist before it, `[Service]` says how to run it, guard it and limit it, and `[Install]` says at which point of the boot it is started.
 
 ```ini title="systemd/sensor-monitord.service"
 [Unit]
@@ -977,6 +985,10 @@ After=local-fs.target
 After=sysinit.target
 Wants=dev-i2c\x2d1.device
 After=dev-i2c\x2d1.device
+
+# Restart rate limit: at most 5 starts in 60 seconds
+StartLimitIntervalSec=60
+StartLimitBurst=5
 
 [Service]
 Type=notify
@@ -989,8 +1001,6 @@ WatchdogSec=15
 # Restart policy
 Restart=on-failure
 RestartSec=3
-StartLimitIntervalSec=60
-StartLimitBurst=5
 
 # Resource limits (cgroup-based)
 MemoryMax=32M
@@ -1012,17 +1022,17 @@ RuntimeDirectoryMode=0755
 WantedBy=multi-user.target
 ```
 
-Here is what each directive does:
+What the main directives do:
 
 | Directive | Purpose |
 |-----------|---------|
-| `Type=notify` | systemd waits for the daemon to send `READY=1` via `sd_notify` before marking the service as active. This ensures all subsystems (I2C, shared memory, socket) are ready before dependents start |
-| `WatchdogSec=15` | If the daemon does not call `sd_notify("WATCHDOG=1")` within 15 seconds, systemd considers it hung and kills it. Combined with `Restart=on-failure`, the daemon restarts automatically |
-| `Restart=on-failure` | Restart the daemon only if it exits with a non-zero status or is killed by a signal. A clean `exit(0)` does not trigger a restart |
-| `RestartSec=3` | Wait 3 seconds between restart attempts to avoid a rapid restart loop |
-| `StartLimitIntervalSec=60` and `StartLimitBurst=5` | Allow at most 5 restarts within 60 seconds. If the daemon keeps crashing, systemd stops trying and marks the unit as "failed" |
-| `MemoryMax=32M` | Kill the process if it exceeds 32 MB of memory. On the Pi Zero 2 W with 512 MB total, this prevents a memory leak from starving other services |
-| `CPUQuota=25%` | Limit the daemon to 25% of one CPU core. The Pi Zero 2 W has four cores, so this leaves plenty of capacity for other tasks |
+| `Type=notify` | systemd waits for the daemon to send `READY=1` with `sd_notify` before it marks the service as active |
+| `WatchdogSec=15` | If the daemon does not call `sd_notify("WATCHDOG=1")` within 15 seconds, systemd treats it as hung and kills it. `Restart=on-failure` then starts it again |
+| `Restart=on-failure` | Restart the daemon only if it exits with a non-zero status or is killed by a signal. A clean `exit(0)` does not cause a restart |
+| `RestartSec=3` | Wait 3 seconds before each restart |
+| `StartLimitIntervalSec=60` and `StartLimitBurst=5` | Set in the `[Unit]` section. Allow at most 5 starts within 60 seconds. If the daemon keeps crashing, systemd stops trying and leaves the unit as "failed" |
+| `MemoryMax=32M` | Kill the process if it uses more than 32 MB of memory, so a memory leak cannot take the memory of other services (the Pi Zero 2 W has 512 MB) |
+| `CPUQuota=25%` | Limit the daemon to 25% of one CPU core, of the four on the Pi Zero 2 W |
 | `ProtectSystem=strict` | Mount the filesystem read-only except for paths listed in `ReadWritePaths` |
 | `WantedBy=multi-user.target` | Enable the service to start automatically when the system reaches multi-user mode (normal boot) |
 
@@ -1031,19 +1041,21 @@ Here is what each directive does:
 <InArticleAd />
 
 
-The Raspberry Pi has a hardware watchdog timer built into the BCM2710. When enabled, the watchdog expects periodic "kicks" (writes to `/dev/watchdog`). If no kick arrives within the timeout period, the watchdog resets the entire board.
+A restart policy catches a program that exits. It does not catch a program that hangs: the process still exists, but it no longer does its work. A watchdog catches that case. It is a timer that counts down and acts when it reaches zero, and the program must reset it ("kick" it) again and again to show that its loop still turns. It works like a guard who must press a button on every round: when the presses stop, somebody is sent to look.
 
-The sensor daemon uses a two-level watchdog strategy:
+The Raspberry Pi has a hardware watchdog timer in the BCM2710. When it is enabled and no kick (a write to `/dev/watchdog`) arrives within the timeout, it resets the whole board.
+
+The sensor daemon uses two watchdogs, one above the other:
 
 <Steps>
 
 1. **systemd watchdog (software level)**
 
-   systemd monitors `sd_notify("WATCHDOG=1")` calls. If the daemon misses a heartbeat within the `WatchdogSec` interval, systemd kills and restarts the daemon. This catches application-level hangs.
+   systemd counts the `sd_notify("WATCHDOG=1")` calls. If none arrives within `WatchdogSec`, systemd kills the daemon and starts it again. This catches a hang in the application.
 
 2. **Hardware watchdog (/dev/watchdog)**
 
-   The daemon also writes to `/dev/watchdog` directly. If the daemon process is killed and systemd itself has a problem restarting it, the hardware watchdog catches this deeper failure and reboots the board entirely. This catches system-level problems.
+   The daemon also writes to `/dev/watchdog`. This timer is in the chip, so it still counts when systemd or the kernel has stopped. It catches a fault of the whole system by a reboot of the board.
 
 </Steps>
 
@@ -1059,7 +1071,7 @@ Verify the watchdog device exists after reboot:
 ls -la /dev/watchdog
 ```
 
-The default timeout is 15 seconds. You can query and set the timeout using the watchdog ioctl interface, but the default works well for most applications.
+The default timeout is 15 seconds. You can read and set the timeout through the watchdog ioctl interface, but the default suits most applications.
 
 **What happens when the daemon hangs:** if you send `SIGSTOP` to the daemon (which freezes it without killing it), neither the systemd heartbeat nor the hardware watchdog kick will arrive:
 
@@ -1075,14 +1087,14 @@ journalctl -u sensor-monitord --since "1 minute ago"
 # Then: "sensor-monitord.service: Scheduled restart job..."
 ```
 
-If systemd itself fails to restart the daemon (for example, because it also hung), the hardware watchdog kicks in and reboots the entire board within another 15 seconds.
+If systemd itself cannot restart the daemon (for example, because it also hung), the hardware watchdog receives no kicks and resets the whole board.
 
 ## Structured Logging with journald
 
 <InArticleAd />
 
 
-Traditional syslog writes human-readable text lines. journald extends this with structured key-value fields that you can query programmatically. The daemon uses the `sd-journal.h` API instead of `printf` or `syslog`.
+When a device fails in the field, the log is the only witness. The older syslog stores lines of text, which you must cut apart with text tools to find one value. journald, the log service of systemd, stores each entry with named fields (a key and a value), and you can search by field. The daemon writes to it with the `sd-journal.h` functions.
 
 Two logging functions are used in the daemon:
 
@@ -1102,7 +1114,7 @@ sd_journal_send("MESSAGE=T=%.2f C, P=%.2f hPa, H=%.2f %%RH",
                 NULL);
 ```
 
-The `sd_journal_send` function accepts arbitrary key-value pairs. Custom field names (like `SENSOR_TYPE`, `TEMPERATURE`) must be uppercase and may contain only letters, digits, and underscores.
+The `sd_journal_send` function accepts any number of key-value pairs. Your own field names (like `SENSOR_TYPE`, `TEMPERATURE`) must be uppercase and may contain only letters, digits, and underscores.
 
 ### Querying Structured Logs
 
@@ -1142,7 +1154,7 @@ for line in sys.stdin:
 "
 ```
 
-Set a size limit on the journal to prevent it from filling the disk:
+A log that grows without limit fills the card, and a full card stops the device. Set a size limit on the journal:
 
 ```bash
 # Edit /etc/systemd/journald.conf
@@ -1159,11 +1171,11 @@ sudo systemctl restart systemd-journald
 <InArticleAd />
 
 
-The daemon provides two IPC mechanisms, each suited to different access patterns.
+The daemon offers two ways to reach its readings. The socket is for a question now and then. The shared memory is for a program that reads all the time. The socket works like a phone call (one question, one answer); the shared memory works like a notice board that anyone may read at any time without calling.
 
 ### Unix Domain Socket
 
-The Unix domain socket (`/run/sensor-monitor.sock`) provides a request/response interface. A client connects, sends a text command, receives a text response, and disconnects. The protocol is intentionally simple:
+Over the Unix domain socket (`/run/sensor-monitor.sock`) a client connects, sends a text command, receives a text response, and disconnects:
 
 | Command | Response |
 |---------|----------|
@@ -1186,11 +1198,11 @@ echo "history" | socat - UNIX-CONNECT:/run/sensor-monitor.sock
 
 ### POSIX Shared Memory Ring Buffer
 
-The shared memory segment (`/sensor-ringbuf`) provides a zero-copy, lock-free read path for high-frequency consumers. Any process can open it read-only and access the ring buffer directly.
+Each socket request costs a connection and a copy of the data. A program that needs the readings many times a second opens the shared memory segment (`/sensor-ringbuf`) read-only and reads the ring buffer in place, with no copy and no lock.
 
-The ring buffer uses a single-writer/multiple-reader pattern with atomic indices. The writer (daemon) increments `write_index` atomically after storing a reading. Readers check `write_index` to find the latest data. Because only one process writes and the struct is aligned, this is safe without a mutex.
+Only the daemon writes. It stores a reading first and then increases `write_index` in one indivisible (atomic) step. A reader takes the entry before `write_index`, which is always complete. That order makes the buffer safe without a mutex.
 
-Here is a standalone program that reads the shared memory directly, bypassing the socket:
+This separate program reads the shared memory directly and does not use the socket:
 
 ```c title="shm-reader-example.c"
 #include <stdio.h>
@@ -1243,14 +1255,16 @@ scp shm-reader pi@raspberrypi.local:~/
 ssh pi@raspberrypi.local ./shm-reader
 ```
 
-**When to use which:** use the Unix socket for interactive queries, configuration changes, and remote access (the socket can be proxied over SSH). Use shared memory when another local process needs continuous access to readings at high frequency (such as a control loop running at 100 Hz) without the overhead of socket round-trips.
+**When to use which:** use the Unix socket for questions asked by a person or a script, for changes of settings, and for remote access (the socket can be forwarded over SSH). Use shared memory when another local process needs the readings all the time at a high rate (such as a control loop at 100 Hz).
 
 ## PREEMPT_RT Kernel Patch
 
 <InArticleAd />
 
 
-The standard Linux kernel is not a real-time operating system. A high-priority userspace process can still experience scheduling delays of several milliseconds due to kernel preemption points, interrupt handling, and lock contention. The PREEMPT_RT patch converts nearly all kernel spinlocks to sleeping mutexes and makes most of the kernel preemptible, reducing worst-case latency from milliseconds to microseconds.
+A microcontroller answers a timer interrupt within microseconds, every time. Standard Linux makes no such promise. It is fast on average, but now and then the kernel is busy in a part of its own code that cannot be interrupted, and your program waits several milliseconds for its turn. That wait is the scheduling latency. The PREEMPT_RT patch makes almost all of the kernel interruptible (preemptible), and the worst wait falls from milliseconds to tens of microseconds.
+
+A sensor read once a second does not need this. For a fast control loop or a safety limit, keep the loop in a microcontroller and let the Linux board supervise it.
 
 ### Applying the Patch
 
@@ -1259,7 +1273,7 @@ The standard Linux kernel is not a real-time operating system. A high-priority u
 1. **Download the PREEMPT_RT patch matching your kernel version**
 
    ```bash
-   cd ~/rpi-linux
+   cd ~/rpi-embedded/rpi-linux
    KERNEL_VERSION=$(make kernelversion)
    echo "Kernel version: $KERNEL_VERSION"
 
@@ -1297,7 +1311,7 @@ The standard Linux kernel is not a real-time operating system. A high-priority u
    make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- -j$(nproc) Image modules dtbs
    ```
 
-   Follow the same installation steps from Lesson 4 to copy the kernel, modules, and device tree to the SD card.
+   Copy the kernel, modules, and device tree to the SD card with the installation steps of the [kernel configuration lesson](/education/embedded-linux-rpi/kernel-configuration-custom-build/).
 
 5. **Verify PREEMPT_RT is active on the Pi**
 
@@ -1315,7 +1329,7 @@ The standard Linux kernel is not a real-time operating system. A high-priority u
 
 ### Setting Real-Time Priority
 
-With a PREEMPT_RT kernel, you can give the sensor daemon real-time scheduling priority so it always preempts normal processes. Add this code near the beginning of `main()` in the daemon (after argument parsing, before hardware init):
+You must also tell the scheduler that your process goes first. Under `SCHED_FIFO` a process runs before every normal process, until it sleeps or a process of higher priority is ready. Add this code near the beginning of `main()` in the daemon (after argument parsing, before hardware init):
 
 ```c
 /* Set real-time scheduling (SCHED_FIFO, priority 50) */
@@ -1331,15 +1345,15 @@ if (sched_setscheduler(0, SCHED_FIFO, &sp) < 0) {
 }
 ```
 
-Real-time priority values range from 1 (lowest) to 99 (highest). Priority 50 is a reasonable default that stays below critical kernel threads (which run at 90+) while preempting all normal (`SCHED_OTHER`) processes.
+Real-time priority values range from 1 (lowest) to 99 (highest). Priority 50 stays below the critical kernel threads (which run at 90 and above) and above all normal (`SCHED_OTHER`) processes.
 
 <Card title="Priority Guidelines" icon="warning">
-Never use priority 99. This is reserved for kernel migration threads and watchdog threads. A userspace process at priority 99 can starve critical kernel work and hang the system. Keep application priorities in the 10 to 80 range.
+Never use priority 99. The kernel keeps it for its own migration and watchdog threads. A userspace process at priority 99 can take the processor from that kernel work and hang the system. Keep application priorities in the 10 to 80 range.
 </Card>
 
 ### Measuring Latency with cyclictest
 
-`cyclictest` is the standard tool for measuring scheduling latency on real-time kernels. Install it from the `rt-tests` package:
+Measure before and after. `cyclictest` asks to be woken every millisecond and records how late each wake-up is. Install it from the `rt-tests` package:
 
 ```bash
 sudo apt install rt-tests
@@ -1362,14 +1376,16 @@ Typical results on the Pi Zero 2 W:
 | Average latency | 15 to 30 us | 8 to 15 us |
 | Max latency | 500 to 2000 us | 50 to 120 us |
 
-The key improvement is the **maximum latency**. For a sensor daemon, a worst-case jitter of 2 ms is acceptable. For motor control or audio processing, the 50 to 120 us worst case of PREEMPT_RT may be necessary.
+Look at the **maximum latency**, not the average: a deadline is missed by the worst case. For a sensor daemon, a worst case of 2 ms does no harm. For audio, or timing that must hold within a fraction of a millisecond, the 50 to 120 us worst case of PREEMPT_RT may be necessary.
 
 ## Socket Activation (Optional)
 
 <InArticleAd />
 
 
-Socket activation is a systemd feature where systemd creates and listens on the socket before the daemon even starts. When the first client connects, systemd starts the daemon and passes the already-open socket file descriptor to it. This saves memory on idle systems (the daemon does not run until needed) and eliminates race conditions during startup (the socket is ready before the daemon initializes).
+With socket activation, systemd creates the socket and listens on it before the daemon starts. When the first client connects, systemd starts the daemon and hands it the open socket. A service that is seldom needed then uses no memory until somebody asks for it, and a client can connect during boot without an error.
+
+A daemon that is not running takes no samples. So use socket activation for a service that only answers requests, not for one that must record all the time.
 
 ### The Socket Unit
 
@@ -1380,6 +1396,8 @@ Description=Sensor Monitor Socket
 [Socket]
 ListenStream=/run/sensor-monitor.sock
 SocketMode=0666
+# The service name differs from the socket name, so name it explicitly
+Service=sensor-monitord.service
 
 [Install]
 WantedBy=sockets.target
@@ -1387,7 +1405,7 @@ WantedBy=sockets.target
 
 ### Modified Service Unit
 
-When using socket activation, remove the `WantedBy=multi-user.target` from the service (it starts on demand) and remove the daemon's own socket creation code. systemd passes the socket as file descriptor 3.
+For socket activation, remove `WantedBy=multi-user.target` from the service (it now starts on demand) and remove the daemon's own socket creation code. systemd passes the socket as file descriptor 3, the first number after standard input, output and error (0, 1 and 2).
 
 The service unit changes:
 
@@ -1462,7 +1480,7 @@ sudo systemctl status sensor-monitord.service
 <InArticleAd />
 
 
-Deploy the daemon and unit files to the Pi, then walk through a full validation sequence.
+Copy the daemon and the unit file to the Pi, then test each promise of the unit file in turn: start at boot, restart after a crash, restart after a hang, and the resource limits.
 
 <Steps>
 
@@ -1597,7 +1615,7 @@ Deploy the daemon and unit files to the Pi, then walk through a full validation 
     Create a systemd timer unit (`sensor-log-export.timer`) that runs every hour. The corresponding service unit runs a shell script that exports the last hour of structured journal entries to a CSV file in `/var/log/sensor/`. Use `journalctl -o json` and a Python or shell script to extract the TEMPERATURE, PRESSURE, and HUMIDITY fields. Set up `LogsDirectory=` in the service so systemd creates the output directory automatically.
   </Card>
   <Card title="Exercise 3: cgroup Memory Limit Testing" icon="pencil">
-    Temporarily modify the daemon to allocate memory in a loop (simulate a memory leak). Set `MemoryMax=16M` in the unit file and observe what happens when the daemon exceeds the limit. Check `journalctl` for the OOM (Out of Memory) kill message. Then add `OOMPolicy=stop` and compare the behavior with the default `OOMPolicy=continue`.
+    Temporarily modify the daemon to allocate memory in a loop (simulate a memory leak). Set `MemoryMax=16M` in the unit file and observe what happens when the daemon exceeds the limit. Check `journalctl` for the OOM (Out of Memory) kill message. Then add `OOMPolicy=continue` and compare the behavior with the default `OOMPolicy=stop`.
   </Card>
   <Card title="Exercise 4: Multi-Sensor Support" icon="pencil">
     Extend the daemon to support multiple I2C sensors by accepting a configuration file that lists I2C bus paths and addresses. Use `EnvironmentFile=` in the systemd unit to pass the config file path. Modify the shared memory ring buffer to include a sensor ID field in each reading, and update the client tool to filter by sensor ID.

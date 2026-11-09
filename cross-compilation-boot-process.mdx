@@ -25,12 +25,12 @@ import { Card, CardGrid, Badge, Steps, LinkButton, FileTree } from '@astrojs/sta
 
 import EmbeddedLinuxRpiComments from '../../../../components/embedded-linux-rpi/EmbeddedLinuxRpiComments.astro';
 
-Most embedded Linux tutorials skip the fundamentals and jump straight into Raspbian. In this lesson, you will do the opposite: set up a cross-compilation toolchain on your host machine, compile a simple C binary for the Raspberry Pi Zero 2 W's ARM Cortex-A53 processor, and then trace exactly how that binary gets executed during the Linux boot sequence. You will prepare a microSD card with a bootloader, kernel, and minimal root filesystem so that your "hello from custom Linux" message appears on the serial console at first boot. #EmbeddedLinux #CrossCompilation #BootProcess
+On a microcontroller, your program is the only software on the chip. On a Linux board, your program is the last link of a chain: firmware starts the board, a kernel takes control of the hardware, a set of files is found on the card, and only then your code runs. When one link is missing the board does not start, and a ready-made system image gives you no way to find which one. In this lesson you build every link by hand for a Raspberry Pi Zero 2 W. You compile a C program on your PC for the board's ARM processor (this is cross-compilation), prepare a microSD card with the firmware, a kernel and a minimal root filesystem, and watch "Hello from custom Linux!" arrive on a serial console at first boot. #EmbeddedLinux #CrossCompilation #BootProcess
 
 ## What We Are Building
 
 <Card title="Custom First-Boot Binary on RPi Zero 2 W" icon="star">
-A complete cross-compiled "hello from custom Linux" application that runs automatically when the Raspberry Pi Zero 2 W boots for the first time. The project covers installing the AArch64 cross-toolchain, writing and compiling a C program on your host PC, preparing a bootable microSD card with all four boot stages (firmware blobs, bootloader, kernel, root filesystem), and wiring a USB-serial adapter so you can watch every boot message scroll past in real time.
+A cross-compiled "hello from custom Linux" program that runs by itself when the Raspberry Pi Zero 2 W boots. You install the AArch64 (64-bit ARM) cross-toolchain, compile a C program on your host PC, prepare a bootable microSD card with every boot stage (firmware files, kernel, root filesystem), and wire a USB-serial adapter so you can read every boot message as it is printed.
 </Card>
 
 **Project specifications:**
@@ -40,7 +40,7 @@ A complete cross-compiled "hello from custom Linux" application that runs automa
 | Target board | Raspberry Pi Zero 2 W (BCM2710A1, Cortex-A53) |
 | Architecture | AArch64 (64-bit ARM) |
 | Cross-toolchain | aarch64-linux-gnu-gcc |
-| Boot stages | GPU firmware, start.elf, U-Boot or config.txt kernel load, init |
+| Boot stages | GPU ROM, bootcode.bin and start.elf, kernel, init |
 | Root filesystem | Minimal hand-built rootfs (BusyBox) |
 | Serial console | 115200 baud via CP2102 or FTDI USB-serial adapter |
 | Storage | microSD card, 16 GB or larger |
@@ -62,52 +62,67 @@ A complete cross-compiled "hello from custom Linux" application that runs automa
 <InArticleAd />
 
 
-When you press the power button on a Raspberry Pi Zero 2 W, the board does not jump straight into Linux. Instead, a carefully orchestrated chain of events unfolds, each stage handing control to the next. Understanding this chain is essential because, later in this course, you will modify nearly every link in it.
+A microcontroller starts your program at once, because the program sits in flash at a fixed address. A Linux board cannot do that. At power-on its RAM is not yet set up, and the kernel is an ordinary file on an SD card. So the board starts in stages, and each stage does only enough to load the next one:
+
+- **Firmware (the bootloader)**: small code that sets up the RAM, reads the card and copies the kernel into memory.
+- **Kernel**: the program that controls the hardware and shares the processor and the memory among all other programs. It contains the drivers.
+- **Root filesystem**: the directory tree the kernel mounts as `/`. It holds every program and setting. The kernel alone contains no shell and no commands.
+- **Init**: the first program the kernel starts from the root filesystem. It starts all others. With no init, the kernel stops with a panic.
+
+The stages work like a relay race: each runner carries the baton only to the next runner, and when one runner is missing, the race stops at that point. A boot stops in the same way, at the first stage whose file is missing or wrong. (In a race each runner stops after the hand-over; here the kernel keeps running under every program.)
+
+On this board the first two stages run on the graphics processor (GPU):
 
 ```text
-  RPi Zero 2 W Boot Sequence
-  ──────────────────────────────────────────
-  Power On
-    │
-    ▼
+  Stages 1 and 2: the GPU loads the kernel
+  ─────────────────────────────────────────
   ┌─────────────────┐
-  │ GPU ROM (SoC)   │ Fixed in silicon
-  │ Loads bootcode  │
+  │ GPU ROM         │ Runs at power-on
+  │ (in the chip)   │ Cannot be changed
+  │ loads           │ Reads the FAT32
+  │ bootcode.bin    │ boot partition
   └────────┬────────┘
+           │ bootcode.bin loads start.elf
            ▼
   ┌─────────────────┐
-  │ start.elf (GPU) │ Reads config.txt
-  │ Init SDRAM      │ Loads kernel + DTB
-  │ Load kernel     │
-  └────────┬────────┘
-           ▼
-  ┌─────────────────┐
-  │ Linux Kernel    │ ARM cores released
-  │ Init MMU, CPUs  │ Mount rootfs
-  │ Probe hardware  │
-  └────────┬────────┘
-           ▼
-  ┌─────────────────┐
-  │ /sbin/init      │ PID 1
-  │ (BusyBox or     │ Start services
-  │  systemd)       │ Launch shell
+  │ start.elf       │ Sets up the RAM
+  │ reads           │ Loads the kernel and
+  │ config.txt      │ the device tree file
   └─────────────────┘
 ```
 
-The RPi Zero 2 W uses the Broadcom BCM2710A1 SoC, which contains both a VideoCore IV GPU and a quad-core ARM Cortex-A53 CPU. Critically, it is the GPU that runs first, not the CPU. The ARM cores remain in reset until the GPU firmware explicitly releases them.
+Then the ARM processor starts, and Linux takes over:
+
+```text
+  Stages 3 and 4: Linux runs on the ARM cores
+  ─────────────────────────────────────────
+  ┌─────────────────┐
+  │ Linux kernel    │ Starts the 4 cores
+  │ reads           │ Finds the hardware
+  │ cmdline.txt     │ Mounts the rootfs
+  └────────┬────────┘
+           ▼
+  ┌─────────────────┐
+  │ /sbin/init      │ Process number 1
+  │ (BusyBox or     │ Runs the start script
+  │  systemd)       │ Opens a shell
+  └─────────────────┘
+```
+
+The board's chip, the Broadcom BCM2710A1, is a system on chip (SoC): it holds a VideoCore IV GPU and four ARM Cortex-A53 processor cores. The GPU runs first. The ARM cores stay in reset until the GPU firmware releases them.
 
 <Steps>
 1. **GPU ROM bootloader (first stage)**
 
-   When power is applied, the VideoCore IV GPU starts executing code from a small ROM embedded in the SoC. This ROM is burned into silicon at the factory and cannot be modified. Its only job is to look for the file `bootcode.bin` on the first FAT32 partition of the SD card. On newer firmware, the ROM loads `start.elf` directly. If the SD card is missing or the file is not found, the boot stops here and the green LED gives an error blink pattern.
+   When power is applied, the VideoCore IV GPU starts executing code from a small ROM embedded in the SoC. This ROM is burned into silicon at the factory and cannot be modified. Its only job is to look for the file `bootcode.bin` on the first FAT32 partition of the SD card. `bootcode.bin` is a small second-stage loader that then loads `start.elf` (only the Pi 4 and later, which boot from an EEPROM, work without `bootcode.bin`). If the SD card is missing or the file is not found, the boot stops here and the green LED gives an error blink pattern.
 
 2. **`start.elf` and `config.txt` (second stage)**
 
-   The GPU loads `start.elf`, which is the main firmware blob. This file initializes SDRAM, reads `config.txt` to determine hardware configuration (clock speeds, UART, display, GPU memory split), and loads the Linux kernel image into memory. On a 64-bit setup, `start.elf` reads the `kernel` parameter from `config.txt` to find the kernel image file (for example, `kernel=Image.gz`). It also loads the device tree blob (`.dtb` file) that describes the hardware layout to the kernel.
+   The GPU loads `start.elf`, which is the main firmware blob. This file initializes SDRAM, reads `config.txt` to determine hardware configuration (clock speeds, UART, display, GPU memory split), and loads the Linux kernel image into memory. On a 64-bit setup, `start.elf` reads the `kernel` parameter from `config.txt` to find the kernel image file (for example, `kernel=Image.gz`). It also loads the device tree blob (`.dtb` file), a list of the board's hardware that the kernel reads to learn which drivers to start.
 
 3. **Linux kernel boots (third stage)**
 
-   The GPU releases the ARM cores from reset and passes control to the kernel entry point. The kernel decompresses itself (if using `Image.gz`), initializes the memory management unit, brings up the CPU cores, and begins probing hardware based on the device tree. You will see kernel log messages on the serial console during this stage. The kernel mounts the root filesystem and looks for the `init` process.
+   The GPU releases the ARM cores from reset and passes control to the kernel entry point. The kernel (already unpacked by the firmware if the file is a compressed `Image.gz`, because a 64-bit ARM kernel cannot decompress itself) sets up the memory management unit (the hardware that gives each program its own memory), starts the CPU cores, and starts a driver for each device listed in the device tree. You will see kernel log messages on the serial console during this stage. The kernel mounts the root filesystem and looks for the `init` process.
 
 4. **Init and userspace (fourth stage)**
 
@@ -115,7 +130,7 @@ The RPi Zero 2 W uses the Broadcom BCM2710A1 SoC, which contains both a VideoCor
 </Steps>
 
 <Card title="Why the GPU boots first" icon="information">
-The Broadcom SoC was originally designed for multimedia applications where the GPU needed to initialize the display as quickly as possible. This architecture means the ARM CPU is a secondary processor from the hardware's perspective. The GPU loads firmware, configures clocks and memory, and only then wakes up the ARM cores. This is why the RPi boot process looks different from most ARM boards that use U-Boot or similar ARM-native bootloaders.
+The Broadcom chip was first designed for multimedia products, where the GPU had to start the display as fast as possible. For the hardware, the ARM processor is the second processor. This is why the Raspberry Pi boot looks different from most ARM boards, where a bootloader such as U-Boot runs on the ARM processor itself.
 </Card>
 
 ## Setting Up the Cross-Toolchain
@@ -123,8 +138,10 @@ The Broadcom SoC was originally designed for multimedia applications where the G
 <InArticleAd />
 
 
+A compiled program is a list of instructions for one family of processor. Your PC has an x86_64 processor and the Pi has an AArch64 (64-bit ARM) processor, and neither can run the other's instructions. The normal `gcc` on your PC produces x86 programs, which the Pi cannot run. A cross-compiler solves this: it runs on one machine (the **host**, your PC) and produces programs for another (the **target**, the Pi).
+
 ```text
-  Cross-Compilation: Host vs Target
+  Cross-compilation: host and target
   ──────────────────────────────────────────
   Host PC (x86_64)          Target (AArch64)
   ─────────────────         ────────────────
@@ -132,17 +149,15 @@ The Broadcom SoC was originally designed for multimedia applications where the G
     │                       Cortex-A53
     ▼
   aarch64-linux-gnu-gcc     Cannot run x86
-    │                       binaries!
+    │                       programs
     ▼
-  hello (AArch64 ELF) ─────► Runs here ✓
+  hello (AArch64 ELF) ─────► Runs here
     │
-    ✗ Cannot run
-      on host
+    ▼
+  Cannot run on the host
 ```
 
-Cross-compilation means compiling code on one machine (the **host**) to produce executables for a different machine (the **target**). Your host is an x86_64 PC running Ubuntu or Debian. Your target is the Raspberry Pi Zero 2 W running an AArch64 (64-bit ARM) processor. You cannot run x86 binaries on ARM or vice versa, so you need a special compiler that runs on x86 but produces ARM machine code.
-
-The cross-toolchain includes a compiler (`aarch64-linux-gnu-gcc`), a linker, an assembler, and supporting libraries. The prefix `aarch64-linux-gnu-` tells you exactly what it targets: the AArch64 architecture, Linux operating system, GNU C library.
+A toolchain is the set of build tools: a compiler (`aarch64-linux-gnu-gcc`), a linker, an assembler, and supporting libraries. The prefix `aarch64-linux-gnu-` names the target: the AArch64 architecture, the Linux operating system, the GNU C library.
 
 Install the toolchain on your host:
 
@@ -184,7 +199,7 @@ sudo apt install -y minicom picocom dosfstools parted \
 ```
 
 <Card title="Why not compile natively on the Pi?" icon="warning">
-The Raspberry Pi Zero 2 W has only 512 MB of RAM and a relatively slow CPU. Compiling a C program natively takes much longer than cross-compiling on a modern PC. When you build the Linux kernel later in this course, the difference is dramatic: what takes 5 minutes on your host could take over an hour on the Pi. Cross-compilation is standard practice in embedded Linux development.
+The Raspberry Pi Zero 2 W has only 512 MB of RAM and a slow CPU. A Linux kernel build that takes 5 minutes on your host could take over an hour on the Pi. And on a new board there is no system yet to compile on. Cross-compilation is the standard practice in embedded Linux.
 </Card>
 
 ## Wiring the Serial Console
@@ -192,7 +207,7 @@ The Raspberry Pi Zero 2 W has only 512 MB of RAM and a relatively slow CPU. Comp
 <InArticleAd />
 
 
-The serial console is your primary debugging interface. Unlike SSH (which requires a working network stack), the serial console works from the very first moments of boot. You will see GPU firmware messages, kernel logs, and your shell prompt, all through three wires.
+A board that does not boot has no network, so it cannot tell you what went wrong. The serial console can: it is a UART on which the kernel prints its messages from the first moments of boot, and on which you later type commands. It needs three wires.
 
 The Raspberry Pi Zero 2 W exposes a UART on its GPIO header:
 
@@ -203,7 +218,11 @@ The Raspberry Pi Zero 2 W exposes a UART on its GPIO header:
 | GND (Pin 6) | Ground | GND on adapter |
 
 <Card title="Important wiring notes" icon="warning">
-**TX connects to RX and RX connects to TX.** This is the most common mistake. The Pi's transmit pin sends data to the adapter's receive pin, and vice versa. Also, the Raspberry Pi GPIO operates at **3.3V logic levels**. Never connect a 5V serial adapter directly to the GPIO pins or you will damage the SoC. The CP2102 and most FTDI adapters have a 3.3V mode. Check your adapter before connecting. Do **not** connect the VCC/5V pin from the adapter to the Pi unless you intend to power the Pi through GPIO (which is not recommended for beginners).
+**TX connects to RX and RX connects to TX.** Wiring TX to TX is the most common mistake: the Pi's transmit pin must reach the adapter's receive pin.
+
+The Raspberry Pi GPIO works at **3.3V logic levels**. A 5V serial adapter on the GPIO pins damages the chip. The CP2102 and most FTDI adapters have a 3.3V mode, so check your adapter before you connect it.
+
+Do **not** connect the VCC/5V pin of the adapter to the Pi. The Pi takes its power from the micro-USB cable.
 </Card>
 
 After wiring, plug the USB-serial adapter into your host PC. It will appear as a device file, typically `/dev/ttyUSB0` or `/dev/ttyACM0`. Check which device appeared:
@@ -232,14 +251,14 @@ sudo usermod -aG dialout $USER
 
 Log out and log back in for the group change to take effect. After that you can run `picocom` without `sudo`.
 
-The baud rate **115200** is the default serial speed configured in the Raspberry Pi firmware. Both the Pi and your terminal program must use the same baud rate or you will see garbled characters. The full serial parameters are 115200 baud, 8 data bits, no parity, 1 stop bit (often written as `115200 8N1`).
+The baud rate **115200** (bits per second) is the default of the Raspberry Pi firmware. The Pi and your terminal program must use the same rate, or you see wrong characters. The full setting is 8 data bits, no parity, 1 stop bit, written `115200 8N1`.
 
 ## Cross-Compiling Your First Binary
 
 <InArticleAd />
 
 
-Now that the toolchain is installed, write a small C program that reads system information from the Linux virtual filesystem. This program will later run on the Pi to confirm that your entire toolchain and boot setup works correctly.
+The test program must prove that it runs on the ARM processor with a working kernel under it. So it asks the kernel for facts. `uname()` returns the kernel version and the machine type. The files `/proc/cpuinfo` and `/proc/meminfo` are not stored on the card: the kernel produces their text when a program reads them.
 
 Create a working directory on your host:
 
@@ -331,7 +350,7 @@ Cross-compile it:
 aarch64-linux-gnu-gcc -o hello_linux hello_linux.c -static
 ```
 
-The `-static` flag links all libraries into the binary so it does not depend on shared libraries on the target. This is important because our minimal root filesystem will not have a full set of shared libraries yet.
+A normal Linux program does not contain the C library. It loads the library from files on the root filesystem each time it starts. Your minimal root filesystem will not have those files, so the program would fail to start. The `-static` flag copies the library code into the program itself, so it needs no other file.
 
 Verify the binary is an AArch64 ELF executable:
 
@@ -346,24 +365,30 @@ hello_linux: ELF 64-bit LSB executable, ARM aarch64, version 1 (GNU/Linux),
 statically linked, BuildID[sha1]=..., for GNU/Linux 3.7.0, not stripped
 ```
 
-The key details: **64-bit**, **ARM aarch64**, and **statically linked**. If you see `x86-64` instead, you accidentally used the system's native `gcc` rather than the cross-compiler.
+Look for three things: **64-bit**, **ARM aarch64**, and **statically linked**. If you see `x86-64`, you used the PC's own `gcc` and not the cross-compiler.
 
-You can also check the binary size:
+Check the size of the program:
 
 ```bash
 ls -lh hello_linux
 ```
 
-A statically linked binary will be larger (around 700 KB to 1 MB) because it includes the C library. For production embedded systems you would use a smaller C library like musl, but for this lesson glibc is fine.
+A statically linked program is larger (around 700 KB to 1 MB) because it includes the C library. Products often use a smaller C library such as musl. For this lesson the GNU C library (glibc) is fine.
 
 ## Building a Minimal Root Filesystem
 
 <InArticleAd />
 
 
-A root filesystem (rootfs) is the directory tree that Linux mounts as `/` at boot. In a desktop distribution, this contains tens of thousands of files. For an embedded system, you need far less. The minimum is: an `init` program, a few device nodes, and the virtual filesystems `/proc` and `/sys` mounted at boot.
+The shell, `ls`, the login prompt and your own program are ordinary files. They live in the root filesystem (rootfs), the directory tree that Linux mounts as `/` at boot. A kernel with no root filesystem prints its messages and then stops with a panic, because it has no first program to start.
 
-BusyBox is a single binary that provides hundreds of common Unix utilities (sh, ls, cat, mount, ifconfig, and many more). By installing BusyBox as your shell and init, you get a functional Linux userspace in a single file.
+A desktop system has tens of thousands of files there. An embedded system needs only:
+
+- an `init` program,
+- a shell and a few commands,
+- the empty directories `/proc`, `/sys` and `/dev`, which the kernel fills with its own information at boot.
+
+BusyBox is one program that does the work of hundreds of common Unix commands (sh, ls, cat, mount and many more), and it can also be the init.
 
 <Steps>
 1. **Create the rootfs directory structure**
@@ -376,7 +401,7 @@ BusyBox is a single binary that provides hundreds of common Unix utilities (sh, 
 
 2. **Download and install BusyBox (static binary)**
 
-   You can either cross-compile BusyBox from source (covered in a later lesson) or download a prebuilt static binary. For this lesson, build a quick static BusyBox:
+   Cross-compile BusyBox from its source. `ARCH` names the target processor family and `CROSS_COMPILE` is the prefix of your cross-compiler. `defconfig` selects the default set of commands:
 
    ```bash
    cd ~/rpi-embedded
@@ -405,7 +430,7 @@ BusyBox is a single binary that provides hundreds of common Unix utilities (sh, 
      CONFIG_PREFIX=~/rpi-embedded/rootfs install
    ```
 
-   This creates `bin/busybox` along with hundreds of symlinks (like `bin/sh`, `bin/ls`, `sbin/init`) that all point back to the BusyBox binary.
+   This creates `bin/busybox` and hundreds of symlinks (names such as `bin/sh`, `bin/ls`, `sbin/init` that all point to the BusyBox program). BusyBox looks at the name it was called by and behaves as that command.
 
 3. **Copy your hello binary**
 
@@ -426,7 +451,7 @@ BusyBox is a single binary that provides hundreds of common Unix utilities (sh, 
    INITTAB
    ```
 
-   The three lines mean: run the startup script once, then spawn a login shell on the console (respawning if it exits), and unmount all filesystems on shutdown.
+   The three lines mean: run the startup script once, then start a login prompt on the console (and start it again each time it exits), and unmount all filesystems on shutdown.
 
 5. **Create the startup script**
 
@@ -448,7 +473,7 @@ BusyBox is a single binary that provides hundreds of common Unix utilities (sh, 
    chmod +x ~/rpi-embedded/rootfs/etc/init.d/rcS
    ```
 
-   This script mounts the essential virtual filesystems that programs need (for example, `/proc/cpuinfo` only exists after `/proc` is mounted), then runs your hello binary.
+   The script first mounts the three virtual filesystems, the directories that the kernel fills with its own information. `/proc/cpuinfo` exists only after `/proc` is mounted, so the order matters. Then it runs your hello program.
 
 6. **Create a basic passwd file**
 
@@ -464,7 +489,7 @@ BusyBox is a single binary that provides hundreds of common Unix utilities (sh, 
    mkdir -p ~/rpi-embedded/rootfs/root
    ```
 
-   This creates a root user with no password, which is fine for embedded development. You will add proper authentication in a later lesson.
+   This creates a root user with no password. That is acceptable on a bench and never in a product.
 </Steps>
 
 Your rootfs directory should now look like this:
@@ -506,7 +531,7 @@ Note that `bin/sh`, `sbin/init`, `sbin/getty`, and many other files are symlinks
 <InArticleAd />
 
 
-The microSD card needs two partitions: a small FAT32 boot partition containing the GPU firmware, device tree, kernel, and `config.txt`, and a larger ext4 root partition containing your rootfs.
+The microSD card needs two partitions, because two different readers use it. The GPU firmware can read only the simple FAT32 format, so the files it loads (the firmware itself, the device tree, the kernel and `config.txt`) go on a small FAT32 boot partition. Linux needs file owners, permissions and symlinks, which FAT32 cannot store, so your rootfs goes on a larger partition in the Linux format ext4.
 
 <Card title="Warning: this will erase the SD card" icon="danger">
 The following commands will destroy all data on the SD card. Double-check the device name before running them. If your SD card is `/dev/sdb`, make absolutely sure it is not your system drive. You can verify by checking the size with `lsblk`.
@@ -548,7 +573,7 @@ Look for the newly appeared device (typically `/dev/sdb` or `/dev/mmcblk0`). In 
 
 4. **Download Raspberry Pi firmware files**
 
-   The boot partition needs the proprietary GPU firmware blobs. Clone the firmware repository (only the boot directory):
+   The boot partition needs the GPU firmware files. Raspberry Pi publishes them only in compiled form. Clone the firmware repository:
 
    ```bash
    cd ~/rpi-embedded
@@ -561,11 +586,15 @@ Look for the newly appeared device (typically `/dev/sdb` or `/dev/mmcblk0`). In 
    sudo cp rpi-firmware/boot/bootcode.bin /mnt/boot/
    sudo cp rpi-firmware/boot/start.elf /mnt/boot/
    sudo cp rpi-firmware/boot/fixup.dat /mnt/boot/
+   sudo cp rpi-firmware/boot/start_cd.elf /mnt/boot/
+   sudo cp rpi-firmware/boot/fixup_cd.dat /mnt/boot/
    ```
+
+   The `_cd` (cut-down) pair is required because `gpu_mem=16` in the `config.txt` below makes the firmware load `start_cd.elf` and `fixup_cd.dat` instead of the standard files. Without them the board does not boot.
 
 5. **Copy the kernel and device tree**
 
-   For this first lesson, use the pre-built kernel from the firmware repository. You will compile your own kernel in Lesson 2.
+   For now, use the ready-built kernel from the firmware repository. You compile your own in [kernel configuration and custom build](/education/embedded-linux-rpi/kernel-configuration-custom-build/).
 
    ```bash
    sudo cp rpi-firmware/boot/kernel8.img /mnt/boot/
@@ -579,7 +608,7 @@ Look for the newly appeared device (typically `/dev/sdb` or `/dev/mmcblk0`). In 
 6. **Create `config.txt`**
 
    ```bash
-   sudo cat > /mnt/boot/config.txt << 'CONFIG'
+   sudo tee /mnt/boot/config.txt > /dev/null << 'CONFIG'
    # Raspberry Pi Zero 2 W boot configuration
    arm_64bit=1
    kernel=kernel8.img
@@ -599,7 +628,7 @@ Look for the newly appeared device (typically `/dev/sdb` or `/dev/mmcblk0`). In 
    echo "console=serial0,115200 root=/dev/mmcblk0p2 rootfstype=ext4 rootwait init=/sbin/init" | sudo tee /mnt/boot/cmdline.txt
    ```
 
-   Everything must be on a **single line**. The parameters tell the kernel to use the serial port for console output, mount the second SD card partition as the root filesystem, and use `/sbin/init` as the first userspace process.
+   Everything must be on a **single line**. The parameters tell the kernel to print its messages on the serial port, to mount the second SD card partition as the root filesystem, to wait until the card is ready (`rootwait`), and to start `/sbin/init` as the first program.
 
 8. **Copy rootfs to the root partition**
 
@@ -623,8 +652,6 @@ Look for the newly appeared device (typically `/dev/sdb` or `/dev/mmcblk0`). In 
 <InArticleAd />
 
 
-With the SD card prepared, it is time to see everything come together.
-
 <Steps>
 1. Insert the microSD card into the Raspberry Pi Zero 2 W.
 2. Connect the USB-serial adapter wires (TX, RX, GND) as described in the wiring section.
@@ -632,13 +659,13 @@ With the SD card prepared, it is time to see everything come together.
 4. Plug in the micro-USB power cable to the Pi.
 </Steps>
 
-You should see boot messages scrolling in your terminal. The output will look something like this:
+Boot messages appear in your terminal. Read the output below in three parts. The lines that start with a number in brackets come from the kernel, and the number is the time in seconds since the kernel started. The `EXT4-fs` and `VFS` lines show the root filesystem being mounted. Everything after "Mounting virtual filesystems..." comes from your own startup script and program.
 
 ```
 [    0.000000] Booting Linux on physical CPU 0x0000000000 [0x410fd034]
 [    0.000000] Linux version 6.6.x-v8+ (gcc version 12.3.0) #1 SMP PREEMPT ...
 [    0.000000] Machine model: Raspberry Pi Zero 2 W Rev 1.0
-[    0.000000] Memory: 440560K/524288K available ...
+[    0.000000] Memory: 440560K/507904K available ...
 ...
 [    1.234567] mmc0: new high speed SDHC card at address 0001
 [    1.240000] mmcblk0: mmc0:0001 SD 14.8 GiB
@@ -661,9 +688,13 @@ Machine:      aarch64
 
 --- /proc/cpuinfo (selected fields) ---
   processor       : 0
+  CPU architecture: 8
   processor       : 1
+  CPU architecture: 8
   processor       : 2
+  CPU architecture: 8
   processor       : 3
+  CPU architecture: 8
 
 --- /proc/meminfo (first 3 lines) ---
   MemTotal:         440560 kB
@@ -673,7 +704,7 @@ Machine:      aarch64
 System ready.
 ```
 
-After the startup script runs, BusyBox getty spawns a login shell. Press Enter and you should see a `#` prompt (root shell with no password). You can now run commands directly on the Pi through the serial console.
+After the startup script, BusyBox shows a login prompt. Type `root` and press Enter (there is no password). At the `#` prompt you can run commands on the Pi through the serial console.
 
 <Card title="Troubleshooting" icon="warning">
 **No output at all:** Check your TX/RX wiring (swap them if needed). Verify the adapter is 3.3V. Confirm the baud rate is 115200.
@@ -690,7 +721,7 @@ After the startup script runs, BusyBox getty spawns a login shell. Press Enter a
 <InArticleAd />
 
 
-The `config.txt` file is not a Linux configuration file. It is read by the GPU firmware (`start.elf`) before the ARM CPU even starts. Think of it as the BIOS settings for the Raspberry Pi. Here are the key parameters you should understand:
+The `config.txt` file is not a Linux configuration file. The GPU firmware (`start.elf`) reads it before the ARM processor starts, so Linux never sees it. It does the work that the BIOS settings do on a PC. These are the lines you wrote:
 
 | Parameter | Value | Purpose |
 |-----------|-------|---------|
@@ -702,9 +733,7 @@ The `config.txt` file is not a Linux configuration file. It is read by the GPU f
 | `disable_splash=1` | 1 | Skips the rainbow splash screen, saving a fraction of a second during boot. |
 | `boot_delay=0` | seconds | Eliminates the default 1-second delay before loading the kernel. |
 
-You can also set CPU and RAM clock speeds, enable or disable specific hardware interfaces, and load device tree overlays for add-on boards. The full list of parameters is documented at [rpf.io/configtxt](https://www.raspberrypi.com/documentation/computers/config_txt.html).
-
-Some additional useful parameters for embedded work:
+The full list of parameters is in the [Raspberry Pi config.txt documentation](https://www.raspberrypi.com/documentation/computers/config_txt.html). Three more are useful for embedded work:
 
 ```ini
 # Set fixed core frequency (avoids clock scaling during timing-sensitive work)
@@ -719,7 +748,7 @@ start_x=0
 ```
 
 <Card title="config.txt vs cmdline.txt" icon="information">
-These two files serve different purposes and are read at different times. `config.txt` is read by the GPU firmware to configure hardware before Linux starts. `cmdline.txt` is passed to the Linux kernel as its command line arguments. Hardware settings go in `config.txt`; kernel behavior settings go in `cmdline.txt`.
+The two files have different readers. The GPU firmware reads `config.txt` to set up hardware before Linux starts. The firmware passes the text of `cmdline.txt` to the Linux kernel as its command line. Hardware settings go in `config.txt`. Settings for the kernel go in `cmdline.txt`.
 </Card>
 
 ## Exercises
@@ -741,7 +770,7 @@ These two files serve different purposes and are read at different times. `confi
   </Card>
 
   <Card title="Exercise 4: Measure boot time" icon="pencil">
-    Add `printk.time=1` to `cmdline.txt` (on the same line, separated by a space). Reboot and look at the timestamps in the kernel log. Record the timestamp of the last kernel message before "Mounting virtual filesystems" appears. This is roughly your kernel boot time. Write down this number; you will compare it against the optimized kernel in Lesson 2.
+    Add `printk.time=1` to `cmdline.txt` (on the same line, separated by a space). Reboot and look at the timestamps in the kernel log. Record the timestamp of the last kernel message before "Mounting virtual filesystems" appears. This is roughly your kernel boot time. Write down this number. You will compare it with the boot time of the smaller kernel you build next.
   </Card>
 </CardGrid>
 

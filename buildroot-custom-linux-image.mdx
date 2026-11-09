@@ -25,48 +25,42 @@ import { Card, CardGrid, Badge, Steps, LinkButton, FileTree } from '@astrojs/sta
 
 import EmbeddedLinuxRpiComments from '../../../../components/embedded-linux-rpi/EmbeddedLinuxRpiComments.astro';
 
-A full Raspbian image carries hundreds of packages your embedded device will never use: a desktop environment, office tools, games, and services that consume memory and slow boot time. For a dedicated sensor node or industrial controller, you want an image containing only what your application needs. Buildroot is a build system that takes a configuration file and produces a complete Linux image (bootloader, kernel, root filesystem) with exactly the packages you select. In this lesson, you will configure Buildroot for the Raspberry Pi Zero 2 W, add the sensor application from earlier lessons as a custom package, lay down configuration files through a filesystem overlay, and generate a flashable SD card image. The final image boots directly into your application with nothing else running. #Buildroot #MinimalLinux #EmbeddedSystems
+A sensor node built on the standard Raspberry Pi OS image carries hundreds of programs it will never use: a desktop, office tools, games, and background services. Each one uses memory, slows the start, and is one more thing that can fail or be attacked. For a device with one job, you want an image that holds only what the job needs. Buildroot is a build system: a set of scripts that reads one configuration file, compiles everything from source code, and produces a complete Linux image with exactly the packages you select. In this lesson you configure Buildroot for the Raspberry Pi Zero 2 W, add the BME280 sensor reader as your own package, add your own configuration files, and produce an image that you write to an SD card. The image starts your application at boot, with almost nothing else running. #Buildroot #MinimalLinux #EmbeddedSystems
 
 ## What We Are Building
 
 <Card title="Minimal Buildroot Image with Sensor Application" icon="star">
-A self-contained Linux image under 32 MB that boots the Raspberry Pi Zero 2 W directly into a sensor monitoring application. The image contains a custom-compiled kernel, BusyBox for essential shell utilities, your BME280 sensor reader as a custom Buildroot package, and a simple init script that launches the application at boot. No package manager, no login prompt, no unnecessary services.
+A Linux image with under 32 MB of files that starts the Raspberry Pi Zero 2 W and runs a sensor monitoring application. The image contains a kernel you compiled, BusyBox (one small program that provides the shell and the common commands), your BME280 sensor reader as a Buildroot package, and a short script that starts the application at boot. There is no package manager, no desktop, and no service you did not choose.
 </Card>
 
 **Image specifications:**
 
 | Parameter | Value |
 |-----------|-------|
-| Build system | Buildroot (latest stable) |
 | Target | Raspberry Pi Zero 2 W (AArch64) |
-| Kernel | Custom-configured (from Lesson 2) |
-| Init system | BusyBox init (simple, fast) |
-| Root filesystem | ext4, read-only with tmpfs overlay for runtime data |
-| Image size | Under 32 MB (SD card image) |
-| Custom package | sensor-monitor (BME280 reader + logger) |
-| Filesystem overlay | /etc configuration, init scripts, application config |
-| Build output | sdcard.img (ready to flash with dd or Etcher) |
-| Build time | Approximately 20 to 40 minutes on a modern x86_64 host |
-
-### Buildroot Package Summary
-
-| Package | Purpose |
-|---------|---------|
-| busybox | Shell, coreutils, init, networking basics |
-| sensor-monitor | Custom package: BME280 reader application |
-| i2c-tools | Debugging I2C bus during development |
-| dropbear | Lightweight SSH (optional, for remote access) |
+| Kernel | Custom-configured (as in the kernel configuration lesson) |
+| Init system | BusyBox init |
+| Root filesystem | ext4, read-only, with RAM storage for runtime data |
+| Image size | Under 32 MB used in the root filesystem (the SD card image file is about 97 MB with the partition sizes below) |
+| Packages | busybox, sensor-monitor (yours), i2c-tools, dropbear (optional SSH) |
+| Build time | 20 to 40 minutes on a modern x86_64 host |
 
 ## What is Buildroot?
 
 <InArticleAd />
 
 
-Buildroot is an open-source build system that generates a complete embedded Linux image (cross-compilation toolchain, kernel, bootloader, and root filesystem) from source. You describe what you want through a configuration file, run `make`, and get a flashable image. Unlike Yocto (which uses a layer-based architecture with its own package format, recipe language, and extensive caching), Buildroot is simpler and faster to learn. A first Buildroot image can be ready in under an hour. The trade-off is that Buildroot offers less flexibility for large-scale product lines with multiple hardware variants and long-term maintenance. For a dedicated sensor node or single-purpose embedded device, Buildroot is an excellent fit.
+On a microcontroller you compile one program and write it to flash memory. A Linux device needs three parts on its card, and they must agree with each other:
+
+- The **bootloader** is the small program that runs first and loads the kernel.
+- The **kernel** is Linux itself. It manages memory, processes and hardware.
+- The **root filesystem** is the tree of folders and files that the kernel mounts as `/`: the shell, the libraries, the configuration files and your application.
+
+A program compiled against one version of the C library fails on a root filesystem that holds another. And if you take a ready image and delete things by hand, you cannot repeat the work exactly on the next device.
+
+Buildroot builds every part from source in one run. It first builds a cross-compilation toolchain (a compiler that runs on your PC and produces code for the ARM processor of the Pi). With that one compiler it builds the kernel and every package, then packs the result into one image file. The same configuration file gives the same image every time.
 
 ```text
-  Buildroot Build Pipeline
-  ──────────────────────────────────────────
   make menuconfig
     │
     ▼
@@ -74,7 +68,6 @@ Buildroot is an open-source build system that generates a complete embedded Linu
     │
     ▼
   make
-    │
     ├──► Download sources ──► /dl/
     ├──► Build toolchain  ──► /host/
     ├──► Build kernel     ──► Image.gz
@@ -84,29 +77,28 @@ Buildroot is an open-source build system that generates a complete embedded Linu
                                │
                                ▼
                           dd to microSD
-                          Boot the Pi!
 ```
 
-| Feature | Buildroot | Yocto |
-|---------|-----------|-------|
-| Learning curve | Low (Kconfig menus) | Steep (BitBake, layers, recipes) |
-| First build time | 20 to 40 minutes | 1 to 3 hours |
-| Package count | ~2,800 | ~10,000+ (via layers) |
-| Output | Single image | Image + SDK + package feeds |
-| Best for | Single-purpose devices | Complex product families |
+Yocto, the build system of a later lesson, does the same job with more machinery: a first build of 1 to 3 hours against 20 to 40 minutes, and about 10,000 packages against 2,800. Buildroot is simpler to learn and suits a device with one purpose. It suits a family of products with several hardware variants less well.
+
+Everything Buildroot produces goes into the `output/` folder. Two of its folders are work areas:
 
 ```text
-  Buildroot Output Directory
-  ──────────────────────────────────────────
   output/
   ├── build/           Extracted + compiled
   │   ├── busybox-*/   sources for each
   │   ├── linux-*/     selected package
   │   └── sensor-monitor-*/
-  ├── host/            Cross-toolchain +
-  │   └── bin/         build tools (runs
-  │       └── aarch64- on your x86 PC)
-  │           linux-gnu-gcc
+  └── host/            Cross-toolchain +
+      └── bin/         build tools (runs
+          └── aarch64- on your x86 PC)
+              linux-gnu-gcc
+```
+
+The other two hold the result. You can inspect `target/` before it is packed into the files in `images/`.
+
+```text
+  output/
   ├── images/          Final output
   │   ├── Image.gz     Kernel
   │   ├── rootfs.ext4  Root filesystem
@@ -135,13 +127,13 @@ Buildroot is an open-source build system that generates a complete embedded Linu
 
 2. **Load the default configuration for Raspberry Pi Zero 2 W**
 
-   Buildroot ships with default configurations for many boards. The Pi Zero 2 W uses the AArch64 configuration:
+   Buildroot has thousands of settings, and nobody sets them all by hand. It ships a defconfig (a short file of known-good settings) for many boards. The Pi Zero 2 W uses the AArch64 (64-bit ARM) one. Run `make list-defconfigs | grep raspberrypi` to see the exact names in your release:
 
    ```bash
-   make raspberrypi0_2w_defconfig
+   make raspberrypizero2w_64_defconfig
    ```
 
-   This creates a `.config` file with sensible defaults: AArch64 target, internal toolchain, Linux kernel from the Raspberry Pi fork, and a minimal root filesystem.
+   This creates a `.config` file with working defaults: AArch64 target, internal toolchain, Linux kernel from the Raspberry Pi fork, and a minimal root filesystem.
 
 3. **Open the configuration menu**
 
@@ -149,17 +141,7 @@ Buildroot is an open-source build system that generates a complete embedded Linu
    make menuconfig
    ```
 
-   The menu is organized into major sections:
-
-   | Menu Section | What It Controls |
-   |-------------|------------------|
-   | Target options | CPU architecture, ABI, floating point |
-   | Toolchain | Compiler version, C library (glibc/musl/uclibc) |
-   | System configuration | Hostname, init system, root password, overlays |
-   | Kernel | Source, version, defconfig, device tree |
-   | Target packages | All user-space packages |
-   | Filesystem images | ext4, squashfs, SD card image layout |
-   | Bootloader | U-Boot or direct kernel boot |
+   The menu has one section for each part of the image. The next part of the lesson goes through the sections you change.
 
 </Steps>
 
@@ -168,7 +150,7 @@ Buildroot is an open-source build system that generates a complete embedded Linu
 <InArticleAd />
 
 
-Navigate through menuconfig and set the following options. You can also edit the `.config` file directly, but menuconfig handles dependencies automatically.
+Set the following options in menuconfig. You can also edit the `.config` file directly, but menuconfig also switches on whatever an option depends on.
 
 <Tabs>
   <TabItem label="Target Options">
@@ -189,7 +171,7 @@ Navigate through menuconfig and set the following options. You can also edit the
         GCC compiler Version: gcc 13.x
     ```
 
-    The internal toolchain is built from source as part of the Buildroot process. This ensures binary compatibility. For faster builds on repeated iterations, you can switch to an external pre-built toolchain like Linaro, but the internal option is simplest for getting started.
+    The internal toolchain is built from source in the Buildroot run, so the compiler and the C library on the target always match. The C library (glibc here) is the code every program uses to ask the kernel for files, memory and time.
   </TabItem>
   <TabItem label="System Configuration">
     ```
@@ -202,7 +184,7 @@ Navigate through menuconfig and set the following options. You can also edit the
         Root filesystem overlay directories: board/siliconwit/rpi0w2/rootfs_overlay
     ```
 
-    BusyBox init is minimal and fast. It reads `/etc/inittab` at boot. devtmpfs lets the kernel create device nodes automatically without needing udev or mdev.
+    The init system is the first program the kernel starts, and it starts everything else. BusyBox init reads its list of things to start from `/etc/inittab`. With devtmpfs the kernel itself creates the device files in `/dev` (such as `/dev/i2c-1`). The password is an example for the bench: set your own before a device leaves your desk.
   </TabItem>
   <TabItem label="Kernel">
     ```
@@ -216,7 +198,7 @@ Navigate through menuconfig and set the following options. You can also edit the
         Device Tree Source file names: broadcom/bcm2710-rpi-zero-2-w
     ```
 
-    If you have a custom kernel configuration from Lesson 2, you can use "Using a custom config file" instead of a defconfig and point it to your saved `.config`.
+    If you saved a kernel configuration of your own when you configured and built the kernel, you can use "Using a custom config file" instead of a defconfig and point it to your saved `.config`.
   </TabItem>
   <TabItem label="Filesystem">
     ```
@@ -228,7 +210,7 @@ Navigate through menuconfig and set the following options. You can also edit the
             Partition table type: hybrid (GPT + MBR)
     ```
 
-    A 64 MB root filesystem is generous for a minimal image. The final SD card image will include the boot partition (FAT32 with kernel and DTB) and the root partition (ext4).
+    A 64 MB root filesystem leaves room to spare for a minimal image. The final SD card image will include the boot partition (FAT32 with kernel and DTB) and the root partition (ext4).
   </TabItem>
 </Tabs>
 
@@ -237,7 +219,7 @@ Navigate through menuconfig and set the following options. You can also edit the
 <InArticleAd />
 
 
-Packages are selected under `Target packages` in menuconfig. Each package has a `BR2_PACKAGE_*` Kconfig variable. Some packages pull in dependencies automatically.
+A package is one piece of software that Buildroot knows how to download, compile and install. You select packages under `Target packages` in menuconfig. Each one has a `BR2_PACKAGE_*` variable in Kconfig (the menu language that Buildroot shares with the Linux kernel). Some packages select the libraries they need.
 
 Add I2C tools for debugging sensor communication:
 
@@ -271,7 +253,7 @@ make olddefconfig  # Resolve dependencies
 <InArticleAd />
 
 
-Buildroot packages follow a strict directory and naming convention. You will create a `sensor-monitor` package that builds the BME280 sensor reader from earlier lessons.
+Your own program is not in Buildroot's list. If you copied a compiled file into the image by hand, the next clean build would lose it, so you make it a package. A package needs two small files with fixed names: `Config.in` puts it in the menu, and a `.mk` file (the recipe) says how to build and install it.
 
 <FileTree>
 - buildroot/
@@ -337,10 +319,12 @@ Buildroot packages follow a strict directory and naming convention. You will cre
    Key points about this recipe:
    - `SENSOR_MONITOR_SITE_METHOD = local` means the source is in the Buildroot tree (not fetched from the internet).
    - `SENSOR_MONITOR_SITE` points to the `src/` directory.
-   - `TARGET_MAKE_ENV` and `TARGET_CONFIGURE_OPTS` inject the cross-compiler and flags.
+   - `TARGET_MAKE_ENV` and `TARGET_CONFIGURE_OPTS` pass the cross-compiler and its flags to your Makefile. Without them the program is compiled for your PC and cannot run on the Pi.
    - `$(eval $(generic-package))` registers this as a Buildroot package.
 
 4. **Write the application source**
+
+   Most of the listing is the datasheet arithmetic that turns the raw numbers of the BME280 into °C, hPa and percent. Read `main()` at the end first. It opens the I2C bus, checks the chip ID, reads the calibration, then prints one CSV line every `interval_sec` seconds. The interval is the first command-line argument.
 
    ```c title="package/sensor-monitor/src/sensor-monitor.c"
    #include <stdio.h>
@@ -615,7 +599,7 @@ Buildroot packages follow a strict directory and naming convention. You will cre
 <InArticleAd />
 
 
-A filesystem overlay is a directory tree that gets copied on top of the generated root filesystem. Any files you place in the overlay appear in the final image at the corresponding path. This is how you add custom configuration files, init scripts, and application settings without modifying Buildroot packages.
+Packages give you programs, but not your own settings and start scripts. If you edited those in `output/target/`, the next clean build would erase them. A filesystem overlay is a folder tree that Buildroot copies on top of the root filesystem as the last step. A file at `etc/inittab` in the overlay becomes `/etc/inittab` in the image. Like a sticker placed over a printed form, your file covers the one a package put at the same path.
 
 Create the overlay directory structure:
 
@@ -637,7 +621,7 @@ mkdir -p board/siliconwit/rpi0w2/rootfs_overlay/etc/sensor-monitor
             - config.conf
 </FileTree>
 
-**Custom inittab** (controls what BusyBox init starts at boot):
+**Custom inittab** (controls what BusyBox init starts at boot). The `sysinit` lines run once at boot, in order. A `respawn` line is started again each time its program ends. The line to notice is `rcS`: it runs every script in `/etc/init.d/` whose name starts with `S`, in number order.
 
 ```bash title="board/siliconwit/rpi0w2/rootfs_overlay/etc/inittab"
 # System initialization
@@ -664,7 +648,7 @@ ttyAMA0::respawn:/sbin/getty -L ttyAMA0 115200 vt100
 ::shutdown:/bin/umount -a -r
 ```
 
-**Init script for the sensor application:**
+**Init script for the sensor application.** The name `S99sensor` makes it one of the last to run. It starts the program in the background, sends its output to the CSV log, and saves its process number in a PID file so that `stop` can find it. Notice what is missing: if the program crashes, nothing starts it again.
 
 ```bash title="board/siliconwit/rpi0w2/rootfs_overlay/etc/init.d/S99sensor"
 #!/bin/sh
@@ -677,8 +661,10 @@ INTERVAL=10
 case "$1" in
     start)
         printf "Starting sensor-monitor: "
+        # -b sends the daemon's output to /dev/null, so the redirection
+        # to the log file must happen inside the background process
         start-stop-daemon -S -b -m -p "$PIDFILE" \
-            -x "$DAEMON" -- "$INTERVAL" > "$LOGFILE" 2>&1
+            -x /bin/sh -- -c "exec $DAEMON $INTERVAL > $LOGFILE 2>&1"
         echo "OK"
         ;;
     stop)
@@ -714,7 +700,9 @@ interval_seconds=10
 log_file=/var/log/sensor-monitor.csv
 ```
 
-The overlay path must match what you set in `System configuration --> Root filesystem overlay directories`. Buildroot copies the entire overlay tree using `rsync` during the final filesystem assembly step.
+This version of the program takes its interval from the command line in `S99sensor` and does not read `config.conf` yet. The file shows where an application's settings belong in an overlay.
+
+The overlay path must match what you set in `System configuration --> Root filesystem overlay directories`.
 
 ## Building the Image
 
@@ -727,18 +715,7 @@ With everything configured, build the complete image:
 make 2>&1 | tee build.log
 ```
 
-The build proceeds through these stages:
-
-| Stage | What Happens | Duration |
-|-------|-------------|----------|
-| Toolchain | Downloads and builds GCC, binutils, glibc | 5 to 10 min |
-| Host utilities | Builds tools needed on the host (fakeroot, mkfs) | 1 to 2 min |
-| Packages | Builds BusyBox, dropbear, i2c-tools, sensor-monitor | 2 to 5 min |
-| Kernel | Builds the Linux kernel and device tree | 5 to 15 min |
-| Root filesystem | Assembles ext4 image, applies overlay | Under 1 min |
-| SD card image | Combines boot and root partitions | Under 1 min |
-
-Total build time on a modern 8-core x86_64 host is typically 20 to 40 minutes for the first build. You can speed it up with parallel jobs:
+The build goes through the stages of the drawing above. The toolchain (5 to 10 minutes) and the kernel (5 to 15 minutes) take most of the time, the packages 2 to 5 minutes, and the two image steps under a minute each. The first build takes 20 to 40 minutes on a modern 8-core PC. Parallel jobs make it faster:
 
 ```bash
 make -j$(nproc) 2>&1 | tee build.log
@@ -753,14 +730,14 @@ ls -lh output/images/
 Expected output:
 
 ```
--rw-r--r-- 1 user user  5.3M  sdcard.img.boot.vfat
--rw-r--r-- 1 user user  6.2M  Image
+-rw-r--r-- 1 user user   32M  boot.vfat
+-rw-r--r-- 1 user user   18M  Image
 -rw-r--r-- 1 user user   15K  bcm2710-rpi-zero-2-w.dtb
 -rw-r--r-- 1 user user   64M  rootfs.ext4
--rw-r--r-- 1 user user   72M  sdcard.img
+-rw-r--r-- 1 user user   97M  sdcard.img
 ```
 
-The `sdcard.img` file is the complete, ready-to-flash image. The `rootfs.ext4` is just the root partition if you need to flash it separately.
+The `sdcard.img` file is the complete image for the card. The `rootfs.ext4` file is the root partition alone: its 64 MB is the partition size you set, not the size of the files in it.
 
 ## Flashing and Testing
 
@@ -843,7 +820,7 @@ The `sdcard.img` file is the complete, ready-to-flash image. The `rootfs.ext4` i
    ps
    ```
 
-   You should see only: init, a few kernel threads, getty (serial console), dropbear (if enabled), and sensor-monitor. No desktop, no systemd, no unnecessary services.
+   You should see only init, a few kernel threads, getty (the serial login), dropbear (if enabled), and sensor-monitor.
 
 </Steps>
 
@@ -852,16 +829,18 @@ The `sdcard.img` file is the complete, ready-to-flash image. The `rootfs.ext4` i
 <InArticleAd />
 
 
-For production embedded systems, mounting the root filesystem as read-only dramatically improves reliability. SD cards wear out from repeated writes, and a read-only root prevents filesystem corruption from unexpected power loss.
+A field device loses power without warning. If the card is in the middle of a write at that moment, the filesystem can be damaged and the device may not start again. SD cards also wear out from repeated writes. A root filesystem mounted read-only has neither problem.
 
-Configure Buildroot for a read-only root:
+Configure Buildroot for a read-only root by turning this option off:
 
 ```
 System configuration --->
-    [*] remount root filesystem read-only at boot
+    [ ] remount root filesystem read-write during boot
 ```
 
-You also need writable areas for runtime data. Add tmpfs mounts in your overlay's `/etc/fstab`:
+Because the overlay supplies its own `/etc/inittab`, also delete the `::sysinit:/bin/mount -o remount,rw /` line from that file. Otherwise it remounts the root filesystem read-write on every boot.
+
+Programs still need somewhere to write logs and PID files. A tmpfs is a filesystem that lives in RAM. Add tmpfs mounts in your overlay's `/etc/fstab`, the table of what is mounted where:
 
 ```bash title="board/siliconwit/rpi0w2/rootfs_overlay/etc/fstab"
 # <device>     <mount>   <type>  <options>         <dump> <pass>
@@ -875,18 +854,18 @@ tmpfs          /var/run  tmpfs   nosuid,nodev      0      0
 With this setup:
 
 - The root filesystem (`/`) and boot partition (`/boot`) are mounted read-only.
-- `/tmp`, `/var/log`, and `/var/run` are tmpfs (RAM-based). Data written here is lost on reboot, which is acceptable for logs and PID files.
-- The SD card receives zero writes during normal operation, extending its lifespan by orders of magnitude.
-- If power is cut at any point, the filesystem is always consistent because nothing was being written to it.
+- `/tmp`, `/var/log`, and `/var/run` are in RAM. Data written here is lost on reboot. That includes the sensor CSV log in `/var/log`.
+- The SD card receives no writes during normal operation, so it lasts much longer.
+- If power is cut at any point, the filesystem is still consistent, because nothing was being written to it.
 
-If the sensor application needs to persist data across reboots, you have two options: add a small writable data partition on the SD card, or use an external storage device.
+If the readings must survive a reboot, add a small writable data partition on the SD card, or use an external storage device.
 
 ## Rebuilding and Iterating
 
 <InArticleAd />
 
 
-One of Buildroot's strengths is fast incremental rebuilds. You do not need to rebuild everything when you change one package.
+You do not rebuild everything when you change one package. Buildroot does not notice that you edited a source file, so you tell it which package to build again.
 
 **Rebuild a single package:**
 
@@ -920,19 +899,17 @@ make -j$(nproc)
 make savedefconfig BR2_DEFCONFIG=configs/siliconwit_rpi0w2_defconfig
 ```
 
-This creates a minimal defconfig that you can version-control. To restore it later:
+This creates a short defconfig to keep in version control: with it, anyone can build the same image. To restore it later:
 
 ```bash
 make siliconwit_rpi0w2_defconfig
 ```
 
-**Useful make targets for debugging:**
+**Other useful make targets:**
 
 | Command | Purpose |
 |---------|---------|
-| `make sensor-monitor-rebuild` | Rebuild one package |
 | `make sensor-monitor-dirclean` | Delete package build directory entirely |
-| `make linux-menuconfig` | Edit kernel config from within Buildroot |
 | `make busybox-menuconfig` | Edit BusyBox config (select which utilities to include) |
 | `make graph-depends` | Generate a dependency graph (requires Graphviz) |
 | `make graph-size` | Generate a size breakdown of the image |
@@ -952,7 +929,7 @@ make siliconwit_rpi0w2_defconfig
     Start with your working image and reduce its size as much as possible. Disable dropbear (no SSH). Use musl instead of glibc (it is much smaller). Run `make graph-size` and identify the largest components. Strip all binaries with `BR2_STRIP_strip=y`. Use `BR2_OPTIMIZE_S=y` for size-optimized compilation. Target: get the root filesystem under 8 MB.
   </Card>
   <Card title="Exercise 3: Add the Kernel Module" icon="pencil">
-    Create a second custom Buildroot package called `mydevice-driver` that builds the kernel module from Lesson 5. Use `$(LINUX_DIR)` in your `.mk` file as the KERNELDIR. Install the `.ko` file to `/lib/modules/$(LINUX_VERSION_PROBED)/extra/`. Add an init script that runs `insmod` at boot. Verify with `lsmod` after booting the image.
+    Create a second custom Buildroot package called `mydevice-driver` that builds the kernel module you wrote in the kernel module lesson. Use `$(LINUX_DIR)` in your `.mk` file as the KERNELDIR. Install the `.ko` file to `/lib/modules/$(LINUX_VERSION_PROBED)/extra/`. Add an init script that runs `insmod` at boot. Verify with `lsmod` after booting the image.
   </Card>
   <Card title="Exercise 4: Dual Partition OTA Updates" icon="pencil">
     Modify the SD card partition layout to have two root partitions (A and B). Write a shell script that downloads a new `rootfs.ext4` image, writes it to the inactive partition, updates the boot configuration to point to the new partition, and reboots. This is a basic over-the-air update mechanism. Test by making a visible change (such as the hostname) and performing an update.

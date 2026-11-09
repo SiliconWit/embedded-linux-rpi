@@ -25,12 +25,12 @@ import { Card, CardGrid, Badge, Steps, LinkButton, FileTree } from '@astrojs/sta
 
 import EmbeddedLinuxRpiComments from '../../../../components/embedded-linux-rpi/EmbeddedLinuxRpiComments.astro';
 
-Buildroot works well for small projects, but when you need license auditing, reproducible builds across a team, a shared SDK, and a layered architecture that separates board support from application logic, the Yocto Project is the industry standard. In this final lesson, you will set up a Yocto build environment, create a custom BSP layer for the Raspberry Pi Zero 2 W, write BitBake recipes for the sensor daemon and client tool, generate a portable SDK that any developer on your team can install, and structure the image for over-the-air (OTA) updates using dual root filesystem partitions. The result is a reproducible, production-ready image built from version-controlled metadata. #YoctoProject #BitBake #ProductionLinux
+A customer reports a fault in a device you shipped a year ago, and nobody on the team can build that exact image again: the build PC was replaced, the sources moved on, and nobody recorded which versions went in. The customer also asks which software licenses are inside the device, and a failed update in the field must not leave a device that cannot start. The Yocto Project is the build system most product teams use for these needs. In this lesson you set up a Yocto build for the Raspberry Pi Zero 2 W, put your own software in a layer of its own, write the build instructions (recipes) for the sensor daemon and its client tool, produce a toolchain installer for your team, and lay out the card for updates that can be undone. #YoctoProject #BitBake #ProductionLinux
 
 ## What We Are Building
 
 <Card title="Production Yocto Image with Custom BSP and SDK" icon="star">
-A complete Yocto-based Linux distribution for the Raspberry Pi Zero 2 W containing a custom BSP layer (meta-siliconwit-rpi), application recipes for sensor-monitord and sensor-query, a generated cross-compilation SDK (.sh installer), and a dual-rootfs partition layout ready for A/B OTA updates. The build is fully reproducible: checking out the same manifest and running BitBake produces an identical image byte-for-byte.
+A Linux distribution for the Raspberry Pi Zero 2 W, built with Yocto. It contains your own layer (meta-siliconwit-rpi), recipes for sensor-monitord and sensor-query, a cross-compilation SDK (a .sh installer), and a card layout with two root filesystems for A/B updates sent over the network (OTA, over the air). Every layer is locked to an exact revision, so the same input files give the same image on any PC.
 </Card>
 
 **Build specifications:**
@@ -38,65 +38,26 @@ A complete Yocto-based Linux distribution for the Raspberry Pi Zero 2 W containi
 | Parameter | Value |
 |-----------|-------|
 | Yocto release | Scarthgap (5.0 LTS) |
-| Build tool | BitBake |
-| Machine | raspberrypi-zero2w |
-| Distro | poky (customized) |
-| Custom layer | meta-siliconwit-rpi (BSP + application recipes) |
+| Machine | raspberrypi0-2w-64 |
+| Custom layer | meta-siliconwit-rpi |
 | Image recipe | siliconwit-image-sensor |
-| SDK | Cross-compilation toolchain + sysroot installer |
 | Partition layout | boot (FAT32) + rootfsA (ext4) + rootfsB (ext4) + data (ext4) |
-| OTA strategy | A/B root filesystem with U-Boot switching |
-| Reproducibility | Locked layer revisions via repo manifest or kas |
-| License audit | Automatic license manifest generation |
-
-### Yocto Layer Structure
-
-| Layer | Purpose |
-|-------|---------|
-| poky (meta, meta-poky) | Core OE recipes and reference distro |
-| meta-raspberrypi | BSP support for Raspberry Pi boards |
-| meta-openembedded | Additional libraries and utilities |
-| meta-siliconwit-rpi | Custom recipes, image definition, distro config |
-
-### Key Recipes
-
-| Recipe | Description |
-|--------|-------------|
-| sensor-monitord_1.0.bb | Daemon application with systemd unit files |
-| sensor-query_1.0.bb | Client CLI tool |
-| siliconwit-image-sensor.bb | Image recipe pulling in all components |
-| siliconwit-rpi.conf | Machine configuration overrides |
-
-```text
-  A/B OTA Partition Layout
-  ──────────────────────────────────────────
-  microSD Card:
-  ┌──────────────────────────────────────┐
-  │ boot (FAT32, 64 MB)                 │
-  │  kernel, DTBs, config.txt, U-Boot   │
-  ├──────────────────────────────────────┤
-  │ rootfsA (ext4, 256 MB) ◄── active   │
-  │  current running system              │
-  ├──────────────────────────────────────┤
-  │ rootfsB (ext4, 256 MB) ◄── standby  │
-  │  OTA writes new image here          │
-  ├──────────────────────────────────────┤
-  │ data (ext4, remaining space)         │
-  │  persistent: logs, config, database  │
-  └──────────────────────────────────────┘
-
-  After OTA: U-Boot switches active slot
-  from A to B. Rollback on boot failure.
-```
+| Reproducibility | Layer revisions locked with kas |
 
 ## What is the Yocto Project?
 
 <InArticleAd />
 
 
+Buildroot gave you one image from one configuration file. Suppose the product gets a second board. Now there are two configuration files, and every fix must be copied by hand into both. After a year the copies no longer match.
+
+The Yocto Project keeps each concern in a separate place, so that one part can change while the others stay as they are:
+
+- A **recipe** is a file that says how to get, compile and install one piece of software, like the `.mk` file in Buildroot.
+- A **layer** is a folder of recipes and settings with one purpose and one owner. The board maker owns the layer for the board, called a BSP (board support package). You own the layer for your applications. For a new board you replace the board layer and keep the rest.
+- **BitBake** is the tool that reads every layer and runs the tasks in the right order.
+
 ```text
-  Yocto Layer Architecture
-  ──────────────────────────────────────────
   ┌─────────────────────────────────────┐
   │ meta-siliconwit-rpi (your layer)    │
   │  recipes: sensor-monitord, image    │
@@ -110,38 +71,30 @@ A complete Yocto-based Linux distribution for the Raspberry Pi Zero 2 W containi
   │ poky (core: meta + meta-poky)       │
   │  gcc, glibc, busybox, systemd       │
   └─────────────────────────────────────┘
-         │
-         ▼ BitBake processes all layers
-  ┌─────────────────────────────────────┐
-  │  Output: rootfs image + SDK + .wic  │
-  └─────────────────────────────────────┘
 ```
 
-The Yocto Project is a collaboration that provides tools and metadata for building custom Linux distributions for embedded systems. Rather than shipping a pre-built distribution, you define exactly what goes into your image through recipes (build instructions), layers (organized collections of recipes), and configuration files.
+A layer above can change what a layer below provides. From the four layers BitBake produces the root filesystem, a complete SD card image (a `.wic` file) and the SDK.
 
 <CardGrid>
   <Card title="Core Components" icon="star">
-    - **BitBake**: the task execution engine that parses recipes and runs build tasks (fetch, configure, compile, install, package)
-    - **OpenEmbedded-Core (OE-Core)**: the foundational set of recipes for building a minimal Linux system (kernel, glibc, busybox, systemd, etc.)
-    - **Poky**: the Yocto reference distribution that combines OE-Core with tools and a default configuration
-    - **Metadata**: recipes (.bb), append files (.bbappend), configuration (.conf), and classes (.bbclass)
+    - **BitBake**: reads the recipes and runs their tasks (fetch, configure, compile, install, package)
+    - **OpenEmbedded-Core (OE-Core)**: the base recipes for a minimal Linux system (kernel, glibc, busybox, systemd)
+    - **Poky**: the Yocto reference distribution, which is OE-Core with BitBake and a default configuration
+    - **Metadata**: recipes (.bb), append files that change a recipe of another layer (.bbappend), configuration (.conf), and classes of shared recipe code (.bbclass)
   </Card>
   <Card title="Yocto vs Buildroot" icon="information">
-    - **Buildroot** (Lesson 6): Makefile-based, fast builds, single-config output, ideal for small dedicated systems
-    - **Yocto**: recipe-based, layered architecture, shared state cache, SDK generation, license auditing, better for teams and products shipping at scale
-    - Buildroot builds everything from scratch each time; Yocto caches intermediate results (sstate) so incremental builds are fast
-    - Yocto has a steeper learning curve but pays off when you need reproducibility, compliance, and maintainability
+    - **Buildroot**: Makefile-based, fast first build, one configuration gives one image, good for a small device with one purpose
+    - **Yocto**: recipes in layers, an SDK for the team, a list of every license in the image, better for teams and for products that ship in numbers
+    - Buildroot compiles everything again after `make clean`. Yocto stores the result of every task in a cache called sstate (shared state), so even a clean build reuses earlier work
   </Card>
 </CardGrid>
-
-**When to choose Yocto:** when your project has multiple developers, needs license compliance tracking, requires a cross-compilation SDK for application developers who do not need the full build system, targets multiple hardware platforms from a shared codebase, or must support field updates with rollback capability.
 
 ## Setting Up the Build Environment
 
 <InArticleAd />
 
 
-Yocto builds are resource-intensive. The first build downloads all source tarballs, compiles the toolchain from scratch, and builds every package. Plan for significant disk space and build time.
+The first build downloads and compiles the toolchain and every package. It needs much more disk space and time than Buildroot, so check your PC first.
 
 ### Host Requirements
 
@@ -180,9 +133,9 @@ cd poky
 source oe-init-build-env build-rpi
 ```
 
-This creates a `build-rpi` directory with default configuration files and sets up environment variables so that `bitbake` is in your `PATH`. Every time you open a new terminal, you must source this script again to restore the environment.
+This creates a `build-rpi` directory with default configuration files, and lets the shell find the `bitbake` command. The settings last only for this terminal: in every new terminal, source the script again.
 
-After sourcing, your working directory changes to `~/yocto/poky/build-rpi`. The directory structure is:
+The script also moves you into `~/yocto/poky/build-rpi`. You edit the two files in `conf/`: `local.conf` holds the settings of this build, and `bblayers.conf` lists the layers.
 
 <FileTree>
 - poky/
@@ -200,13 +153,13 @@ After sourcing, your working directory changes to `~/yocto/poky/build-rpi`. The 
 <InArticleAd />
 
 
-A layer is a directory containing recipes, configuration, and classes organized under a common purpose. Layer names conventionally start with `meta-`. Each layer has a `conf/layer.conf` that declares its name, priority, and compatibility.
+By convention a layer's name starts with `meta-`. Each layer has a `conf/layer.conf` that declares its name, its priority, and the Yocto releases it works with.
 
-Yocto resolves recipes by searching layers in priority order. A recipe in a higher-priority layer overrides one with the same name in a lower-priority layer. This is how BSP layers customize core recipes without forking them.
+Layers exist so that you never edit files you do not own. If you change a recipe inside `meta-raspberrypi`, your change is lost or in conflict the next time you update that layer. So each layer has a priority number, and when two layers hold a recipe with the same name, BitBake uses the one from the layer with the higher number. Your layer overrides or appends to a core recipe, and the original stays as its owner wrote it.
 
 ### Adding Required Layers
 
-You need two additional layers: `meta-raspberrypi` for Raspberry Pi BSP support, and `meta-openembedded` for additional libraries.
+Poky alone does not know the Raspberry Pi. You need two more layers: `meta-raspberrypi`, the BSP for Raspberry Pi boards, and `meta-openembedded` for additional libraries. Clone each on the same release branch as Poky (`scarthgap`): layers of different releases do not work together.
 
 ```bash
 cd ~/yocto
@@ -265,7 +218,7 @@ BBLAYERS ?= " \
 <InArticleAd />
 
 
-Create a custom layer to hold your application recipes, image definition, and distro configuration.
+Everything that is yours goes into one layer of your own: the application recipes, the definition of the image, and your settings.
 
 ```bash
 cd ~/yocto/poky
@@ -330,20 +283,22 @@ BBFILE_COLLECTIONS += "siliconwit-rpi"
 BBFILE_PATTERN_siliconwit-rpi = "^${LAYERDIR}/"
 BBFILE_PRIORITY_siliconwit-rpi = "10"
 
-LAYERDEPENDS_siliconwit-rpi = "core meta-raspberrypi"
+LAYERDEPENDS_siliconwit-rpi = "core raspberrypi"
 LAYERSERIES_COMPAT_siliconwit-rpi = "scarthgap"
 ```
 
-The priority of 10 is higher than all other layers, ensuring your recipes take precedence when there is a conflict.
+The priority of 10 is higher than that of every other layer in the list above, so your recipe is used when two recipes have the same name. `LAYERDEPENDS` uses collection names, not directory names: the collection that `meta-raspberrypi` declares in its own `layer.conf` is `raspberrypi`.
 
 ## Writing Application Recipes
 
 <InArticleAd />
 
 
-A BitBake recipe (.bb) is a file that describes how to fetch, configure, compile, install, and package a piece of software. Recipe filenames follow the convention `<name>_<version>.bb`.
+A recipe file is named `<name>_<version>.bb`.
 
 ### sensor-monitord Recipe
+
+Read the recipe in three parts. The top says what the software is and under which license. The middle says where the source files are and what the software needs. The two functions at the end, `do_compile()` and `do_install()`, are the commands you would type by hand. Each `${...}` is a BitBake variable: `${CC}` is the cross-compiler, `${D}` is a temporary folder that stands for `/` on the target, and `${PN}` is the name of the package.
 
 ```python title="recipes-apps/sensor-monitord/sensor-monitord_1.0.bb"
 SUMMARY = "BME280 sensor monitoring daemon with systemd integration"
@@ -380,6 +335,11 @@ do_install() {
 
     install -d ${D}${systemd_system_unitdir}
     install -m 0644 sensor-monitord.service ${D}${systemd_system_unitdir}/sensor-monitord.service
+
+    # The unit file from Lesson 7 starts /usr/local/bin/sensor-monitord,
+    # but this recipe installs the binary in ${bindir} (/usr/bin)
+    sed -i -e 's|/usr/local/bin|${bindir}|' \
+        ${D}${systemd_system_unitdir}/sensor-monitord.service
 }
 
 FILES:${PN} = " \
@@ -388,22 +348,19 @@ FILES:${PN} = " \
 "
 ```
 
-Here is what each variable and function does:
+The other variables:
 
 | Element | Purpose |
 |---------|---------|
-| `LICENSE` and `LIC_FILES_CHKSUM` | Declares the license and provides a checksum so BitBake can verify it. Required for every recipe |
-| `SRC_URI` | Lists source files to fetch. `file://` means local files in the `files/` subdirectory next to the recipe |
-| `S = "${WORKDIR}"` | Source directory. Since we use local files (not a tarball), sources are directly in WORKDIR |
-| `DEPENDS` | Build-time dependencies. We need systemd headers and libraries for compilation |
-| `RDEPENDS:${PN}` | Runtime dependencies. i2c-tools ensures the I2C kernel modules are loaded |
-| `inherit systemd` | Pulls in the systemd bbclass, which handles service file installation and enable/disable logic |
-| `SYSTEMD_SERVICE:${PN}` | Tells the systemd class which service file to manage |
-| `do_compile()` | The build step. Uses BitBake-provided `${CC}`, `${CFLAGS}`, and `${LDFLAGS}` for cross-compilation |
-| `do_install()` | Installs files into the staging directory `${D}` using standard paths |
-| `FILES:${PN}` | Declares which installed files belong to the main package |
+| `LICENSE` and `LIC_FILES_CHKSUM` | The license, and a checksum of its text so BitBake can detect a changed license. Required for every recipe |
+| `SRC_URI` | Source files to fetch. `file://` means local files in the `files/` subdirectory next to the recipe |
+| `S = "${WORKDIR}"` | Source directory. Local files, not an archive, are directly in WORKDIR |
+| `DEPENDS` | Needed to compile: here the systemd headers and libraries |
+| `RDEPENDS:${PN}` | Needed on the device with this package. i2c-tools puts `i2cdetect` and related tools on the target for checking the bus; the I2C kernel modules are loaded by `KERNEL_MODULE_AUTOLOAD` in `local.conf` |
+| `inherit systemd` and `SYSTEMD_SERVICE:${PN}` | The systemd class enables the named service at boot |
+| `FILES:${PN}` | Which installed files belong to the main package |
 
-Copy the source files from Lesson 7 into the recipe's `files/` directory:
+Copy the source files of the daemon you built in the [system services lesson](/education/embedded-linux-rpi/system-services-process-management/) into the recipe's `files/` directory:
 
 ```bash
 cp ~/rpi-sensor-daemon/src/sensor-monitord.c \
@@ -417,6 +374,8 @@ cp ~/rpi-sensor-daemon/systemd/sensor-monitord.service \
 ```
 
 ### sensor-query Recipe
+
+The client tool needs no service file and no systemd library, so its recipe is the same pattern with fewer lines.
 
 ```python title="recipes-apps/sensor-query/sensor-query_1.0.bb"
 SUMMARY = "Client tool for sensor-monitord"
@@ -456,7 +415,7 @@ cp ~/rpi-sensor-daemon/src/sensor-protocol.h \
 
 ### Verifying Recipes Parse Correctly
 
-Before building, check that BitBake can parse the recipes without errors:
+A full build takes hours, so find mistakes in the recipes first. `bitbake -e` prints every variable of a recipe after BitBake has read (parsed) all the layers:
 
 ```bash
 cd ~/yocto/poky
@@ -466,14 +425,14 @@ bitbake -e sensor-monitord | grep ^SRC_URI=
 bitbake -e sensor-query | grep ^SRC_URI=
 ```
 
-If there are parse errors, BitBake prints the file and line number. Common mistakes include missing backslashes in multi-line variables and incorrect indentation (BitBake uses Python-style syntax in recipe metadata).
+On a parse error BitBake prints the file and line number. The usual causes are a missing backslash in a variable of several lines, and wrong indentation.
 
 ## The Image Recipe
 
 <InArticleAd />
 
 
-An image recipe defines the final root filesystem contents. It inherits from `core-image` (which provides the base functionality) and adds your application packages.
+An image recipe builds no software. It is the list of packages that go into the root filesystem, like the package choices in the Buildroot menu. It inherits the `core-image` class, which gives a minimal system that starts, and adds your packages to it.
 
 ```python title="recipes-core/images/siliconwit-image-sensor.bb"
 SUMMARY = "SiliconWit Sensor Image for Raspberry Pi Zero 2 W"
@@ -527,16 +486,17 @@ IMAGE_ROOTFS_EXTRA_SPACE = "131072"
 
 Key points:
 
-- `inherit core-image` provides the `IMAGE_INSTALL` mechanism and the root filesystem assembly logic.
-- `ssh-server-dropbear` installs a lightweight SSH server so you can access the board remotely.
-- `debug-tweaks` sets an empty root password and enables root login. Remove this for production images.
-- `IMAGE_ROOTFS_EXTRA_SPACE` adds 128 MB (in KB) of free space beyond what the installed packages require.
-- Each `IMAGE_INSTALL` entry must correspond to a recipe (or package name) that BitBake can find in the configured layers.
+- `ssh-server-dropbear` installs a small SSH server so you can reach the board over the network.
+- `debug-tweaks` sets an empty root password and allows root login. With it, anyone on the network can enter the device. Remove it before an image leaves your bench.
+- `IMAGE_ROOTFS_EXTRA_SPACE` adds 128 MB (the value is in KB) of free space beyond what the packages need.
+- Each `IMAGE_INSTALL` entry must be a recipe or package that BitBake can find in the layers.
 
 ## Machine and Distro Configuration
 
 <InArticleAd />
 
+
+Yocto separates two questions. The machine is the hardware: which processor, kernel and device tree. The distro is the policy for the whole system: which init system and which features. With the two apart, one distro can run on several machines.
 
 ### Machine Configuration (local.conf)
 
@@ -574,11 +534,11 @@ DL_DIR = "${TOPDIR}/../downloads"
 SSTATE_DIR = "${TOPDIR}/../sstate-cache"
 ```
 
-The `MACHINE` variable is the most important setting. It determines which BSP recipes are used, which kernel configuration is applied, and which device tree files are included. The `raspberrypi0-2w-64` machine definition comes from the `meta-raspberrypi` layer and targets the 64-bit (AArch64) configuration.
+`MACHINE` is the most important setting. It selects the BSP recipes, the kernel configuration and the device tree files. The `raspberrypi0-2w-64` definition comes from the `meta-raspberrypi` layer and is 64-bit (AArch64).
 
 ### Custom Distro Configuration (Optional)
 
-For production, you may want a custom distro configuration that overrides Poky defaults. Create a distro conf file:
+For production, you may want a distro of your own that starts from the Poky defaults and changes some of them:
 
 ```python title="conf/distro/siliconwit-rpi.conf"
 require conf/distro/poky.conf
@@ -603,7 +563,7 @@ DEFAULT_TIMEZONE = "UTC"
 FULL_OPTIMIZATION = "-O2 -pipe"
 ```
 
-To use this distro, set `DISTRO = "siliconwit-rpi"` in `local.conf`. If you skip this step, the default Poky distro works fine for development.
+To use this distro, set `DISTRO = "siliconwit-rpi"` in `local.conf`. If you skip this step, the default Poky distro is enough for development.
 
 ## Building the Image
 
@@ -621,7 +581,7 @@ bitbake siliconwit-image-sensor
 
 ### Build Stages
 
-BitBake processes each recipe through a series of tasks. For the entire image, this involves hundreds of recipes, but the stages for each one follow the same pattern:
+BitBake takes each of the hundreds of recipes through the same tasks. When a build fails, the error names a recipe and one of these tasks, and that tells you where to look:
 
 | Task | Description |
 |------|-------------|
@@ -642,7 +602,7 @@ Monitor the build progress:
 tail -f ~/yocto/poky/build-rpi/tmp/log/cooker/raspberrypi0-2w-64/*.log
 ```
 
-The first build takes 1 to 3 hours depending on your hardware. Subsequent builds are much faster because BitBake caches intermediate results in the shared state (sstate) directory.
+The first build takes 1 to 3 hours, depending on your PC. Later builds are much faster, because BitBake keeps the result of each task in the sstate cache and runs a task again only when its inputs have changed.
 
 ### Build Output
 
@@ -684,7 +644,7 @@ The `dd` command writes raw data to a block device. Writing to the wrong device 
 <InArticleAd />
 
 
-The SDK (Software Development Kit) is a self-contained, portable toolchain installer that any developer on your team can use to cross-compile applications for the target without setting up the full Yocto build environment. The SDK includes the cross-compiler, sysroot with all target libraries and headers, and environment setup scripts.
+An application developer should not need 50 GB of disk and a build of several hours to compile one C file. A compiler from elsewhere is no answer: its C library may differ from the one in your image. The SDK (software development kit) is one installer file made from your image. It holds the cross-compiler, the sysroot (a copy of the libraries and headers of the target), and a script that sets the environment.
 
 ### Building the SDK
 
@@ -711,7 +671,7 @@ poky-glibc-x86_64-siliconwit-image-sensor-cortexa53-raspberrypi0-2w-64-toolchain
 ./poky-glibc-x86_64-siliconwit-image-sensor-cortexa53-raspberrypi0-2w-64-toolchain-5.0.sh
 ```
 
-Accept the default installation directory or specify a custom path. The installer copies the toolchain and sysroot and creates an environment setup script.
+Accept the default installation directory or give another path.
 
 ```bash
 # Source the environment (required before each build session)
@@ -736,27 +696,40 @@ file sensor-query
 # sensor-query: ELF 64-bit LSB executable, ARM aarch64, ...
 ```
 
-The SDK is useful for application developers who need to compile code for the target but should not have to wait for a full Yocto build. Distribute the `.sh` installer to your team, and they can set up their toolchain in minutes.
+Give the `.sh` installer to your team. Each developer has a working toolchain in minutes.
 
 ## A/B Root Filesystem for OTA
 
 <InArticleAd />
 
 
-Over-the-air (OTA) updates in the field require a strategy that avoids bricking the device if an update fails partway through. The dual root filesystem (A/B) approach is the most common pattern: the device has two root filesystem partitions, and the bootloader switches between them.
+A device in the field is updated over the network, with nobody near it. If the update writes over the running system and the power fails halfway, the device holds half an old system and half a new one, and it cannot start.
+
+The A/B method removes that risk. The card holds two root filesystem partitions, called slots. The device runs from one slot, and an update is written to the other. Only when the write is complete is the bootloader told to start from the new slot. If the new system does not start, the bootloader returns to the old slot, which nobody has touched. It is like building a new bridge beside the old one: traffic uses the old bridge until the new one is complete and tested.
 
 ### Partition Layout
 
-| Partition | Mount Point | Size | Purpose |
-|-----------|-------------|------|---------|
-| boot | /boot | 64 MB | FAT32, kernel + DTB + config.txt |
-| rootfsA | / | 512 MB | ext4, primary root filesystem |
-| rootfsB | (inactive) | 512 MB | ext4, update target |
-| data | /data | Remaining | ext4, persistent application data |
+```text
+  ┌──────────────────────────────────────┐
+  │ boot (FAT32, 64 MB)                  │
+  │  kernel, DTBs, config.txt, U-Boot    │
+  ├──────────────────────────────────────┤
+  │ rootfsA (ext4, 512 MB) ◄── active    │
+  │  current running system              │
+  ├──────────────────────────────────────┤
+  │ rootfsB (ext4, 512 MB) ◄── standby   │
+  │  OTA writes new image here           │
+  ├──────────────────────────────────────┤
+  │ data (ext4, 256 MB in the image)     │
+  │  kept: logs, config, database        │
+  └──────────────────────────────────────┘
+```
+
+The safety has a price: the card holds the root filesystem twice. The data partition is mounted at `/data`. It is 256 MB in the image file, and you grow it on first boot to fill the card.
 
 ### WKS File for SD Card Layout
 
-Yocto uses WIC (a disk image creation tool) with `.wks` files that describe the partition layout. Create a custom WKS file:
+Yocto builds the card image with a tool named WIC, which reads the partition layout from a `.wks` file. Each `part` line is one partition, in the order of the drawing, with sizes in MB. Create a custom WKS file:
 
 ```bash title="wic/siliconwit-rpi-ab.wks"
 # Boot partition (FAT32)
@@ -771,7 +744,8 @@ part / --source rootfs --ondisk mmcblk0 \
 part --ondisk mmcblk0 \
     --fstype=ext4 --label rootfsB --align 4096 --size 512
 
-# Persistent data partition (fills remaining space)
+# Persistent data partition (256 MB in the image; wic cannot fill the
+# card, so grow this partition on first boot)
 part /data --ondisk mmcblk0 \
     --fstype=ext4 --label data --align 4096 --size 256
 ```
@@ -785,7 +759,9 @@ IMAGE_FSTYPES = "wic.bz2 ext4"
 
 ### U-Boot Environment for A/B Switching
 
-The A/B switching logic lives in the U-Boot environment. U-Boot checks a flag to decide which partition to boot from:
+Something must choose the slot before Linux starts. By default the `meta-raspberrypi` layer lets the Pi firmware start the kernel directly. U-Boot is a bootloader that can run small scripts. To put it between the firmware and the kernel, add `RPI_USE_U_BOOT = "1"` to `local.conf`.
+
+U-Boot keeps named values, its environment, on the card. Below, `boot_slot` selects the slot, `select_root` turns it into a partition number, and `boot_kernel` passes that partition to the kernel as `root=`:
 
 ```bash title="u-boot-env.txt"
 # A/B boot selection
@@ -807,7 +783,7 @@ boot_kernel=setenv bootargs "console=ttyS0,115200 root=/dev/mmcblk0p${root_part}
 
 1. **Write the new image to the inactive partition**
 
-   If the device is currently booted from rootfsA (partition 2), the update writes to rootfsB (partition 3):
+   If the device now runs from rootfsA (partition 2), the update writes to rootfsB (partition 3). The commands `fw_printenv` and `fw_setenv` read and write the U-Boot environment from Linux:
 
    ```bash
    # Determine the inactive partition
@@ -839,7 +815,7 @@ boot_kernel=setenv bootargs "console=ttyS0,115200 root=/dev/mmcblk0p${root_part}
 
 4. **Verify and finalize (in the new root)**
 
-   After rebooting, the application should run a self-test. If everything passes, mark the update as successful. If the boot fails or the self-test fails, U-Boot increments `boot_attempts`. After `max_boot_attempts` failures, U-Boot falls back to the previous partition:
+   After the reboot, the application runs a self-test. If the test passes, it marks the update as good. If the boot or the self-test fails, U-Boot adds one to `boot_attempts`. After `max_boot_attempts` failures, U-Boot returns to the previous partition. The environment above does not yet contain this counting step. You add it yourself:
 
    ```bash
    # Add this to the U-Boot bootcmd (before boot_kernel):
@@ -848,18 +824,20 @@ boot_kernel=setenv bootargs "console=ttyS0,115200 root=/dev/mmcblk0p${root_part}
 
 </Steps>
 
-The data partition (`/data`) is shared between both root filesystems and is never overwritten during an update. Store application configuration, sensor logs, and calibration data on this partition.
+Both root filesystems use the same data partition (`/data`), and an update never writes to it. Store application configuration, sensor logs, and calibration data there.
 
 ## Reproducible Builds
 
 <InArticleAd />
 
 
-A reproducible build means that checking out the same source revision and running the same build command produces an identical output image. This is essential for debugging field issues ("which exact code is running on that device?") and for regulatory compliance.
+A reproducible build gives the same image whenever and wherever you run it from the same inputs. Without it you cannot answer the question "which exact code is running on that device?".
+
+The commands so far are not reproducible. `git clone -b scarthgap` takes the newest commit of a branch, and the branch receives fixes every week.
 
 ### Locking Layer Revisions with kas
 
-[kas](https://kas.readthedocs.io/) is a setup tool that defines all layers, their git revisions, and build configuration in a single YAML file:
+[kas](https://kas.readthedocs.io/) is a setup tool that names every layer, its exact git commit, and the build settings in one YAML file. The commit values below are placeholders: put the real commit hashes of your clones there (`git rev-parse HEAD` in each layer).
 
 ```yaml title="kas-siliconwit.yml"
 header:
@@ -893,11 +871,13 @@ repos:
 
   meta-siliconwit-rpi:
     path: "../meta-siliconwit-rpi"
-    layers:
-      meta-siliconwit-rpi:
 
 local_conf_header:
   siliconwit: |
+    DISTRO_FEATURES:append = " systemd"
+    DISTRO_FEATURES_BACKFILL_CONSIDERED:append = " sysvinit"
+    VIRTUAL-RUNTIME_init_manager = "systemd"
+    VIRTUAL-RUNTIME_initscripts = "systemd-compat-units"
     ENABLE_I2C = "1"
     ENABLE_UART = "1"
     KERNEL_MODULE_AUTOLOAD:rpi += "i2c-dev i2c-bcm2835"
@@ -912,11 +892,11 @@ pip3 install kas
 kas build kas-siliconwit.yml
 ```
 
-kas checks out the exact commit specified for each layer, generates `local.conf` and `bblayers.conf`, and runs BitBake. Anyone with this YAML file can reproduce the same image.
+kas checks out the exact commit named for each layer, generates `local.conf` and `bblayers.conf`, and runs BitBake. Anyone with this YAML file and your layer can build the same image.
 
 ### Sharing the Shared State Cache (SSTATE)
 
-The sstate cache stores compiled artifacts keyed by recipe version, configuration, and input hashes. Sharing this cache across developers and CI systems eliminates redundant compilation.
+The sstate cache stores the output of each task under a hash of everything that went into it. If the hash matches, the stored output is used and nothing is compiled. When developers and the build server share one cache, each piece is compiled once for the whole team.
 
 Set up a shared cache on a network drive or HTTP server:
 
@@ -929,11 +909,11 @@ DL_DIR = "/shared/yocto/downloads"
 SSTATE_MIRRORS = "file://.* http://sstate-server.local/sstate/PATH"
 ```
 
-With a warm sstate cache, a rebuild that only changes one recipe takes minutes instead of hours.
+With a filled sstate cache, a rebuild that changes only one recipe takes minutes, not hours.
 
 ### Building in a Container
 
-For maximum reproducibility, run the build inside a Docker container with a fixed OS version and toolchain:
+The layers are now locked, but the build PC is not: a different Ubuntu version brings different host tools. Run the build inside a Docker container (a packaged, fixed copy of an operating system) so that every build uses the same host:
 
 ```dockerfile title="Dockerfile"
 FROM ubuntu:22.04
@@ -961,14 +941,14 @@ docker build -t yocto-builder .
 docker run -it -v ~/yocto:/home/builder/yocto yocto-builder
 ```
 
-Inside the container, follow the same steps: source the environment, run BitBake. The container ensures every developer and CI system uses identical host tools.
+Inside the container, follow the same steps: source the environment, run BitBake.
 
 ## License Compliance
 
 <InArticleAd />
 
 
-Shipping a product that contains open-source software requires compliance with each component's license terms. Yocto automates much of this process.
+Every open-source component in your image has a license with conditions for shipping it. Some ask only that you include their text. The GPL family also asks that you offer the source code. An image holds hundreds of components, so a list made by hand will miss some. Yocto makes the list from the `LICENSE` line of every recipe.
 
 ### Generating the License Manifest
 
@@ -991,21 +971,11 @@ This directory contains:
 
 ### Understanding SPDX
 
-Yocto uses SPDX (Software Package Data Exchange) identifiers for license names. Common ones you will encounter:
-
-| SPDX Identifier | Common Name |
-|-----------------|-------------|
-| `MIT` | MIT License |
-| `GPL-2.0-only` | GNU GPL v2 |
-| `GPL-2.0-or-later` | GNU GPL v2+ |
-| `LGPL-2.1-only` | GNU LGPL v2.1 |
-| `Apache-2.0` | Apache License 2.0 |
-| `BSD-2-Clause` | Simplified BSD |
-| `BSD-3-Clause` | New BSD |
+Yocto names licenses with SPDX (Software Package Data Exchange) identifiers, a standard set of short names such as `MIT`, `Apache-2.0`, `BSD-3-Clause`, `GPL-2.0-only` and `LGPL-2.1-only`. The ending `-only` or `-or-later` says whether later versions of the license also apply.
 
 ### Handling Commercial Licenses
 
-Some packages have licenses that require explicit opt-in. BitBake refuses to build these unless you whitelist them:
+Some packages have terms that may need a paid license in a product. BitBake refuses to build them until you accept them by name:
 
 ```bash
 # In local.conf, allow specific commercial licenses

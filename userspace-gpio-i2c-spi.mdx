@@ -25,26 +25,26 @@ import { Card, CardGrid, Badge, Steps, LinkButton, FileTree } from '@astrojs/sta
 
 import EmbeddedLinuxRpiComments from '../../../../components/embedded-linux-rpi/EmbeddedLinuxRpiComments.astro';
 
-Embedded Linux gives you multiple ways to interact with hardware from userspace, and choosing the right interface matters. The old sysfs GPIO approach is deprecated, character device access through libgpiod is the modern replacement, and I2C/SPI peripherals are reached through /dev entries and ioctl calls. In this lesson, you will build a practical doorbell monitor application: a push button triggers a GPIO event that lights an LED and simultaneously logs temperature, humidity, and pressure readings from a BME280 sensor over I2C. The entire application runs in userspace with no kernel module required. #LinuxGPIO #Libgpiod #UserspaceDrivers
+On a microcontroller you read a pin by reading a register. On Linux an ordinary program is not allowed to touch a register, and many people conclude that every button and sensor needs a kernel driver, which is slow to write and can stop the whole board when it has a bug. Most of the time that is wrong. The kernel already offers pins and buses to ordinary programs as device files under /dev. In this lesson you use three of them (GPIO, I2C and SPI) and build a doorbell monitor: a push button produces a GPIO event, and the program switches an LED and logs temperature, humidity and pressure from a BME280 sensor. You write no kernel code. #LinuxGPIO #Libgpiod #UserspaceDrivers
 
 ## What We Are Building
 
 <Card title="GPIO Doorbell Monitor with I2C Sensor Logging" icon="star">
-A C application that uses libgpiod to monitor a push button via edge-detection events (no polling), toggles an LED on each press, and reads the BME280 sensor over I2C using the i2c-dev interface. Each button event triggers a timestamped log entry with the current temperature, humidity, and pressure. The application demonstrates event-driven GPIO, raw I2C transactions via ioctl, and basic SPI access patterns using spidev.
+A C program that uses libgpiod to wait for a push button, toggles an LED on each press, and reads the BME280 sensor over I2C through the i2c-dev interface. Each press writes a log line with the time, temperature, humidity and pressure. You also send bytes over SPI with spidev.
 </Card>
+
+Userspace is the area where ordinary programs run, each in its own protected memory, separate from the kernel. The commands in this lesson (`apt`, `sudo`, `gcc` on the board) need a full system such as Raspberry Pi OS on the Pi.
 
 **Project specifications:**
 
 | Parameter | Value |
 |-----------|-------|
-| GPIO library | libgpiod v2 (character device API) |
+| GPIO library | libgpiod v1.6 (character device API) |
 | Button input | GPIO17 with internal pull-up, falling-edge event |
 | LED output | GPIO27, active-high |
 | I2C device | /dev/i2c-1 via i2c-dev |
 | Sensor | BME280 at 0x76, raw register reads via ioctl |
 | SPI example | /dev/spidev0.0 via spidev (loopback demo) |
-| Log output | Timestamped CSV to stdout or file |
-| Language | C (compiled with aarch64-linux-gnu-gcc) |
 
 ### Bill of Materials
 
@@ -53,7 +53,7 @@ A C application that uses libgpiod to monitor a push button via edge-detection e
 | 1 | Push button (tactile switch) | 1 | Doorbell trigger on GPIO17 |
 | 2 | LED (any color, 3mm or 5mm) | 1 | Visual indicator on GPIO27 |
 | 3 | 330 ohm resistor | 1 | Current limiting for LED |
-| 4 | BME280 breakout module | 1 | Reuse from Lesson 3 |
+| 4 | BME280 breakout module | 1 | The one from the device tree overlay |
 | 5 | Jumper wires | 6+ | Button, LED, BME280 connections |
 | 6 | Breadboard | 1 | For prototyping the circuit |
 
@@ -64,59 +64,57 @@ A C application that uses libgpiod to monitor a push button via edge-detection e
 <InArticleAd />
 
 
-Linux provides two fundamentally different approaches to interacting with hardware peripherals. Each has distinct trade-offs.
+Code that operates a peripheral can live in an ordinary program, or inside the kernel as a driver. The choice decides how fast the code reacts, and what happens when it has a bug.
 
 | Aspect | Userspace Access | Kernel-Space Access |
 |--------|-----------------|-------------------|
 | Interface | Character devices (`/dev/i2c-1`, `/dev/spidev0.0`, `/dev/gpiochipN`) | Kernel modules and drivers |
 | Latency | Higher (syscall overhead, scheduling) | Lower (direct register access, interrupt context) |
 | Safety | Crash does not take down the system | Bug can panic the kernel |
-| Development speed | Fast iteration, no reboot needed | Slower, requires module reload or reboot |
 | Debugging | Standard tools (gdb, printf, strace) | printk, ftrace, kgdb |
-| When to use | Prototyping, moderate-speed peripherals, sensors, user-facing apps | Hard real-time, DMA, high-speed protocols, shared hardware |
+| When to use | Prototypes, sensors, slow peripherals | Strict timing, fast protocols, hardware shared by many programs |
 
-For a BME280 sensor that updates a few times per second, or an LED that toggles on a button press, userspace access is the right choice. You get simpler code, safer operation, and faster development cycles. The kernel IIO driver (loaded via the device tree overlay from Lesson 3) handles the low-level register protocol; your userspace code reads the processed values.
+For a sensor that is read a few times per second, userspace is the right place.
+
+The kernel still owns the pins and the buses, and its bus drivers move every bit. Your program decides what to send, and asks through a device file. It is like a shop with a counter: customers (programs) ask at a window, and only the clerk (the kernel) goes into the store room where the registers are. A customer who drops something affects only himself, but every request costs the clerk a trip, which is why userspace is slower for strict timing. The path of each request:
 
 ```text
-  Linux Userspace Hardware Access
+  Three device files, one kernel
   ──────────────────────────────────────────
-  Your C Application
+  Your C program
     │          │           │
     ▼          ▼           ▼
   libgpiod  /dev/i2c-1  /dev/spidev0.0
-  (GPIO)    (I2C ioctl) (SPI ioctl)
+  (GPIO)    (I2C)       (SPI)
     │          │           │
     ▼          ▼           ▼
   ┌──────────────────────────────────────┐
-  │          Linux Kernel                 │
-  │  gpiochip driver  i2c-bcm  spi-bcm  │
+  │             Linux kernel             │
+  │  gpiochip driver   i2c-bcm   spi-bcm │
   └──────────────────────────────────────┘
     │          │           │
     ▼          ▼           ▼
   GPIO pins   SDA/SCL    MOSI/MISO/CLK
 ```
 
+The doorbell monitor has no loop that keeps reading the pin. It sleeps in `gpiod_line_event_wait()`, and the kernel wakes it when the button produces an edge:
+
 ```text
-  GPIO Event Detection (libgpiod)
+  One button press, from pin to log line
   ──────────────────────────────────────────
-  Button ──► GPIO17 (pull-up, active-low)
+  Button ──► GPIO17 (pull-up, press = low)
                 │
                 ▼
-  gpiod_line_event_wait()  ◄── blocks here
+  gpiod_line_event_wait()  ◄── sleeps here
                 │
-                │ falling edge detected
+                │ falling edge
                 ▼
   gpiod_line_event_read()
                 │
                 ├──► Toggle LED (GPIO27)
-                ├──► Read BME280 via I2C
+                ├──► Read BME280 over I2C
                 └──► Log: "23.5C, 65%, 1013hPa"
-
-  No polling loop needed. The kernel wakes
-  your process only when the button fires.
 ```
-
-For this lesson, we will interact with hardware through three userspace interfaces: **libgpiod** for GPIO, **i2c-dev** for I2C, and **spidev** for SPI.
 
 ---
 
@@ -136,9 +134,16 @@ echo out > /sys/class/gpio/gpio27/direction
 echo 1 > /sys/class/gpio/gpio27/value
 ```
 
-This interface has several problems: no proper ownership model (any process can unexpectedly change pins), race conditions between export and configuration, no support for atomic multi-pin operations, and no clean event notification mechanism. The sysfs GPIO interface was formally deprecated in Linux 4.8 and is absent from many modern kernel configurations.
+This interface has four problems:
 
-The replacement is the **GPIO character device** interface, accessed through `/dev/gpiochip0`, `/dev/gpiochip1`, etc. The **libgpiod** library provides both command-line tools and a C API for this interface.
+- A pin has no owner. Any process can change a pin that another process is using.
+- A pin stays exported after the program that exported it has crashed.
+- Several pins cannot be changed at the same moment.
+- There is no clean way to wait for an edge.
+
+The sysfs GPIO interface was formally deprecated in Linux 4.8, and many modern kernels are built without it.
+
+The replacement is the **GPIO character device**: one file per GPIO controller, `/dev/gpiochip0`, `/dev/gpiochip1` and so on. A program requests the lines (pins) it needs. A requested line belongs to that program alone, and the kernel releases it when the program ends, even after a crash. The **libgpiod** library gives you command-line tools and C functions for this interface.
 
 ### Install libgpiod
 
@@ -159,9 +164,15 @@ sudo apt install -y libgpiod-dev:arm64
 </TabItem>
 </Tabs>
 
-### Command-Line Tools
+The commands and C code in this lesson use libgpiod version 1 (1.6.x, the version packaged by Raspberry Pi OS Bookworm and Ubuntu 22.04). Check yours with `gpiodetect --version`.
 
-After installing, you have several useful tools:
+libgpiod 2.x changed both the tools and the library:
+
+- The tools take the chip as an option, for example `gpioset -c gpiochip0 27=1`, `gpioget -c gpiochip0 17` and `gpiomon -c gpiochip0 -e falling 17`.
+- `gpioset` keeps running to hold the line and does not exit.
+- The C functions were replaced (`gpiod_chip_request_lines()` takes the place of `gpiod_chip_get_line()` and the `gpiod_line_request_*()` calls), so the programs below do not compile against the version 2 header.
+
+### Command-Line Tools
 
 **List available GPIO chips:**
 
@@ -182,7 +193,7 @@ gpiochip1 [raspberrypi-exp-gpio] (8 lines)
 gpioinfo gpiochip0
 ```
 
-This shows all 54 GPIO lines, their names, direction, and current consumer (if any).
+This shows all 54 GPIO lines with their names, their direction, and their consumer: the name of the program or driver that has requested the line, if any.
 
 **Set a GPIO output (blink an LED on GPIO27):**
 
@@ -211,7 +222,7 @@ gpiomon --falling-edge gpiochip0 17
 
 ### Blink an LED with the libgpiod C API
 
-Create a file called `blink.c`:
+Every libgpiod program has the same four steps: open the chip, get the line, request the line (as output or input, with a consumer name), and release it at the end. Create a file called `blink.c`:
 
 ```c title="blink.c"
 #include <gpiod.h>
@@ -270,7 +281,7 @@ gcc -o blink blink.c -lgpiod
 sudo ./blink
 ```
 
-The program opens the GPIO chip, requests GPIO27 as an output line with the consumer name `"blink-app"`, then toggles it 20 times with a 500 ms period. After finishing, it cleanly releases the line and closes the chip. While the program runs, `gpioinfo` will show GPIO27 with consumer `"blink-app"`.
+The LED blinks 20 times, 500 ms on and 500 ms off (a 1 s period). While the program runs, `gpioinfo` shows GPIO27 with the consumer `"blink-app"`, and no other program can request that line.
 
 ---
 
@@ -279,7 +290,9 @@ The program opens the GPIO chip, requests GPIO27 as an output line with the cons
 <InArticleAd />
 
 
-Polling a GPIO input in a tight loop wastes CPU time and misses fast events. The libgpiod event API lets your application block efficiently until a rising or falling edge occurs, using the kernel's interrupt mechanism internally.
+A loop that reads an input again and again (polling) keeps the processor busy for nothing, and it misses a pulse that is shorter than the time between two reads. With events, your program asks the kernel to watch the line and then sleeps. The kernel uses the pin's hardware interrupt, records the time of each edge, and wakes your program. A falling edge is a change from high to low, a rising edge from low to high.
+
+Look at three calls: `gpiod_line_request()` asks for falling-edge events, `gpiod_line_event_wait()` sleeps until an event or the timeout, and `gpiod_line_event_read()` fetches the event with its timestamp.
 
 ```c title="button_event.c"
 #include <gpiod.h>
@@ -369,12 +382,12 @@ gcc -o button_event button_event.c -lgpiod
 sudo ./button_event
 ```
 
-Key points about this code:
+What to notice:
 
-- `GPIOD_LINE_REQUEST_FLAG_BIAS_PULL_UP` enables the internal pull-up resistor on GPIO17, so the button just needs to connect GPIO17 to GND. No external resistor required.
-- `gpiod_line_event_wait()` blocks the process (sleeping, not spinning) until an edge occurs or the timeout expires. This uses almost zero CPU while waiting.
-- The event timestamp comes from the kernel's monotonic clock, giving you precise timing of each edge.
-- The 10-second timeout prevents the program from hanging indefinitely during testing.
+- `GPIOD_LINE_REQUEST_FLAG_BIAS_PULL_UP` switches on the pull-up resistor inside the chip, which holds GPIO17 high while the button is open. The button only has to connect GPIO17 to GND, and no external resistor is needed.
+- The program uses almost no CPU while it sleeps in `gpiod_line_event_wait()`.
+- The kernel takes the timestamp at the moment of the edge, so it does not depend on how late your program wakes.
+- The 10-second timeout ends the program if nobody presses the button.
 
 ---
 
@@ -383,11 +396,11 @@ Key points about this code:
 <InArticleAd />
 
 
-The `i2c-dev` kernel module exposes each I2C bus as a character device (`/dev/i2c-0`, `/dev/i2c-1`, etc.). You interact with the bus using standard `open()`, `ioctl()`, `read()`, and `write()` system calls.
+The `i2c-dev` kernel module shows each I2C bus as a device file (`/dev/i2c-0`, `/dev/i2c-1` and so on). Your program calls `open()` on the bus, one `ioctl()` to choose the device address, then `write()` and `read()` to move bytes. The kernel produces the start condition, the address byte and the acknowledge bits.
 
 ### Enable i2c-dev
 
-The module is usually loaded automatically, but you can ensure it is available:
+Load the module:
 
 ```bash
 sudo modprobe i2c-dev
@@ -402,15 +415,24 @@ You should see `/dev/i2c-1` (the I2C bus exposed on the GPIO header).
 i2cdetect -y 1
 ```
 
-If your BME280 is wired correctly, you will see `76` (or `77`) in the output. If the kernel IIO driver from Lesson 3 has already claimed the device, you will see `UU` instead.
+If your BME280 is wired correctly, you see `76` (or `77`) in the output. If the kernel's bmp280 driver has already taken the device, because your [device tree overlay](/education/embedded-linux-rpi/device-trees-hardware-description/) is still loaded, you see `UU`.
 
 <Card title="Important" icon="warning">
-If a kernel driver (like the IIO bme280 driver from your device tree overlay) has already bound to the sensor, you cannot also access it via `i2c-dev`. The kernel locks the address. For raw userspace I2C access, either remove the device tree overlay or unload the driver: `sudo rmmod bme280`. For production use, choose one approach, not both.
+A device has one owner. If a kernel driver (such as the bmp280 driver started by your device tree overlay) holds the sensor, your program cannot also use it through `i2c-dev`: the kernel reports the address as busy. To read the sensor from your own program, remove the `dtoverlay=` line of the overlay and reboot, or unload the driver: `sudo rmmod bmp280_i2c`. In a product, choose one of the two ways.
 </Card>
 
 ### BME280 I2C Communication in C
 
-The BME280 uses a register-based protocol. You write a register address, then read back data bytes. The chip ID register (0xD0) should return 0x60 for a BME280 (or 0x58 for a BMP280).
+With the kernel driver, you read finished values from files. Here your program does the driver's work itself.
+
+The BME280 holds its settings and results in registers, numbered bytes inside the chip. To read one, you write the register number, then read back data bytes. The chip ID register (0xD0) returns 0x60 for a BME280 (or 0x58 for a BMP280).
+
+The program is long, but it has four parts:
+
+1. Two helpers that write and read registers.
+2. `read_calibration()`, which reads the correction numbers that the factory stored in the chip.
+3. Three `compensate_*()` functions from the Bosch datasheet, which turn raw readings into degrees, hPa and percent. You do not need to follow their arithmetic.
+4. `main()`, which opens the bus, checks the chip ID, configures the sensor and reads it once.
 
 ```c title="bme280_i2c.c"
 #include <stdio.h>
@@ -615,11 +637,12 @@ int main(void)
     /* Configure: humidity oversampling x1 */
     i2c_write_byte(REG_CTRL_HUM, 0x01);
 
+    /* Configure: standby 1000ms, filter off (written while the sensor is
+       still in sleep mode; writes to config may be ignored in normal mode) */
+    i2c_write_byte(REG_CONFIG, 0xA0);
+
     /* Configure: temp oversampling x1, pressure oversampling x1, normal mode */
     i2c_write_byte(REG_CTRL_MEAS, 0x27);
-
-    /* Configure: standby 1000ms, filter off */
-    i2c_write_byte(REG_CONFIG, 0xA0);
 
     /* Wait for first measurement */
     usleep(50000);
@@ -664,7 +687,7 @@ Pressure:    1013.25 hPa
 Humidity:    45.30 %RH
 ```
 
-The compensation formulas come directly from the Bosch BME280 datasheet (section 4.2.3). They convert the raw 20-bit ADC values into physical units using factory-programmed calibration coefficients stored on the sensor chip.
+The compensation formulas are from the Bosch BME280 datasheet (section 4.2.3). The temperature must be computed first, because the pressure and humidity formulas use its intermediate result `t_fine`.
 
 ---
 
@@ -673,7 +696,7 @@ The compensation formulas come directly from the Bosch BME280 datasheet (section
 <InArticleAd />
 
 
-The `spidev` kernel module exposes SPI buses as character devices (`/dev/spidev0.0`, `/dev/spidev0.1`, etc.). The first number is the bus, the second is the chip select line.
+SPI has no device addresses: each device has its own chip select line. And the bus sends and receives at the same time: for every bit that goes out on MOSI, one bit comes in on MISO. The `spidev` kernel module shows each chip select as a device file (`/dev/spidev0.0`, `/dev/spidev0.1` and so on). The first number is the bus and the second is the chip select line. One `ioctl()` call does a complete transfer in both directions.
 
 ### Enable SPI
 
@@ -693,7 +716,9 @@ You should see `/dev/spidev0.0` and `/dev/spidev0.1`.
 
 ### SPI Loopback Test
 
-A loopback test physically connects MOSI (GPIO10) to MISO (GPIO9) with a jumper wire. Whatever you send out on MOSI should come back on MISO. This verifies your SPI configuration without needing an external device.
+For a loopback test, connect MOSI (GPIO10) to MISO (GPIO9) with a jumper wire. What you send on MOSI then comes back on MISO.
+
+The program sets the SPI mode (the clock polarity and phase), the bits per word and the clock speed. Then it fills a `struct spi_ioc_transfer` with a send buffer and a receive buffer of the same length, and runs the transfer.
 
 ```c title="spi_loopback.c"
 #include <stdio.h>
@@ -802,7 +827,7 @@ gcc -o spi_loopback spi_loopback.c
 sudo ./spi_loopback
 ```
 
-The `struct spi_ioc_transfer` is the core of userspace SPI. It describes a single full-duplex transfer: the kernel clocks out `tx_buf` on MOSI while simultaneously clocking in data on MISO into `rx_buf`. The `SPI_IOC_MESSAGE(1)` ioctl sends one transfer. You can batch multiple transfers by passing an array and using `SPI_IOC_MESSAGE(N)`.
+The `struct spi_ioc_transfer` describes one full-duplex transfer: on the same clock pulses, the kernel sends `tx_buf` on MOSI and stores what arrives on MISO in `rx_buf`. The `SPI_IOC_MESSAGE(1)` ioctl runs one transfer. To run several with chip select held active, pass an array and use `SPI_IOC_MESSAGE(N)`.
 
 ---
 
@@ -811,7 +836,7 @@ The `struct spi_ioc_transfer` is the core of userspace SPI. It describes a singl
 <InArticleAd />
 
 
-Now let's combine GPIO events, I2C sensor reads, and LED control into a single event-driven application. When the button is pressed, the program toggles the LED and reads the BME280 sensor, logging a timestamped CSV entry.
+Now join GPIO events, the I2C sensor and the LED in one program. On each press it toggles the LED, reads the BME280, and writes one line with the time and the readings to a CSV file (a text file that a spreadsheet opens).
 
 ### Circuit Connections
 
@@ -827,6 +852,8 @@ Now let's combine GPIO events, I2C sensor reads, and LED control into a single e
 | BME280 GND | GND | |
 
 ### Complete Source Code
+
+Most of this listing is the BME280 code you already ran. The new part is `main()` at the end: read its `while (running)` loop first. Ctrl+C sets `running` to 0, so the loop ends and `cleanup()` releases the lines and closes the files.
 
 ```c title="doorbell_monitor.c"
 #include <stdio.h>
@@ -1029,10 +1056,10 @@ static int bme280_init(void)
 
     /* Humidity oversampling x1 */
     i2c_write_byte(REG_CTRL_HUM, 0x01);
+    /* Standby 1000ms, filter off (set before leaving sleep mode) */
+    i2c_write_byte(REG_CONFIG, 0xA0);
     /* Temp x1, pressure x1, normal mode */
     i2c_write_byte(REG_CTRL_MEAS, 0x27);
-    /* Standby 1000ms, filter off */
-    i2c_write_byte(REG_CONFIG, 0xA0);
 
     usleep(50000);
     printf("BME280 initialized (chip ID: 0x60)\n");
@@ -1147,7 +1174,7 @@ int main(void)
     printf("\n--- Doorbell Monitor Running ---\n");
     printf("Press the button on GPIO%d. Ctrl+C to quit.\n\n", BUTTON_LINE);
     printf("%-20s  %-6s  %-4s  %-8s  %-10s  %-8s\n",
-           "Timestamp", "Press", "LED", "Temp(C)", "Press(hPa)", "Hum(%%)");
+           "Timestamp", "Press", "LED", "Temp(C)", "Press(hPa)", "Hum(%)");
 
     while (running) {
         ret = gpiod_line_event_wait(button, &timeout);
@@ -1172,8 +1199,12 @@ int main(void)
         gpiod_line_set_value(led, led_state);
         press_count++;
 
-        /* Simple debounce: ignore events for 200ms */
+        /* Simple debounce: wait 200ms, then discard the edges that
+           contact bounce queued in the kernel during that time */
         usleep(200000);
+        struct timespec no_wait = { .tv_sec = 0, .tv_nsec = 0 };
+        while (gpiod_line_event_wait(button, &no_wait) > 0)
+            gpiod_line_event_read(button, &event);
 
         /* Read sensor */
         double temp, pres, hum;
@@ -1203,7 +1234,9 @@ int main(void)
 }
 ```
 
-The design uses `gpiod_line_event_wait()` with a 1-second timeout as the main loop mechanism. This serves two purposes: it sleeps efficiently while waiting for button presses, and the periodic timeout lets the program check the `running` flag so it can respond to Ctrl+C cleanly. The 200 ms `usleep()` after each event acts as a simple debounce filter.
+The main loop waits in `gpiod_line_event_wait()` with a 1-second timeout. The program sleeps while it waits for a press, and once a second the timeout lets it check the `running` flag, so Ctrl+C ends it cleanly.
+
+A mechanical button does not close once. Its contacts bounce for a few milliseconds and produce several falling edges for one press. The program handles this in two steps: it waits 200 ms with `usleep()`, then a short loop reads and discards the edges that arrived during that time. The sleep alone is not enough, because the kernel keeps every edge in a queue and would give the bounces to the next `gpiod_line_event_wait()` call.
 
 ---
 
@@ -1228,7 +1261,7 @@ aarch64-linux-gnu-gcc -Wall -o doorbell_monitor doorbell_monitor.c \
     --sysroot=/path/to/pi-sysroot
 ```
 
-The sysroot must contain the aarch64 versions of `libgpiod.so` and `linux/i2c-dev.h`. If you set up the cross-compilation environment in Lesson 2, you already have these.
+A sysroot is a folder on the host that holds the target's libraries and header files. It must contain the aarch64 versions of `libgpiod.so` and `linux/i2c-dev.h`. The `aarch64-linux-gnu-gcc` toolchain alone does not include libgpiod, so the sysroot is usually a copy of the `/usr` and `/lib` directories of the Pi.
 
 ### Transfer to the Pi
 
@@ -1261,8 +1294,8 @@ sudo usermod -aG gpio,i2c $USER
 ### Expected Output
 
 ```
-BME280 initialized (chip ID: 0x60)
 GPIO initialized: button=GPIO17, LED=GPIO27
+BME280 initialized (chip ID: 0x60)
 
 --- Doorbell Monitor Running ---
 Press the button on GPIO17. Ctrl+C to quit.
@@ -1275,7 +1308,7 @@ Timestamp             Press   LED   Temp(C)   Press(hPa)  Hum(%)
 Cleanup complete.
 ```
 
-The log file (`doorbell_log.csv`) accumulates entries across multiple runs, making it easy to import into a spreadsheet or plotting tool.
+The log file (`doorbell_log.csv`) is opened in append mode, so each run adds its lines to those of earlier runs.
 
 ### Project File Structure
 
@@ -1322,6 +1355,10 @@ clean:
 
 ---
 
+:::tip[Instrument it]
+The userspace GPIO, I2C, and SPI code in this lesson is already an instrument; point it at a real sensor instead of an LED. Wire a BME280 (temperature, humidity, pressure) on I2C or an ADXL345 on SPI, read it with the same libgpiod and spidev calls, and the Pi becomes a logger with a full Linux stack behind it. A short Python service can then [stream the readings](/education/iot-systems/) and let siliconwit.io [chart them and alert on a limit](https://siliconwit.io); when the timing has to be tight, push the front end onto an [MCU](/education/sensor-actuator-interfacing-stm32/) and let the Pi aggregate.
+:::
+
 ## Exercises
 
 <InArticleAd />
@@ -1336,7 +1373,7 @@ Extend the doorbell monitor to distinguish between a single press and a double p
 </Card>
 
 <Card title="Exercise 3: I2C Bus Scanner" icon="rocket">
-Write a C program that replicates `i2cdetect`: scan all 112 valid I2C addresses (0x03 to 0x77) on `/dev/i2c-1` by attempting to read one byte from each address. Print a grid showing which addresses respond with an ACK. Compare your output to `i2cdetect -y 1` to verify correctness.
+Write a C program that replicates `i2cdetect`: scan all 112 valid I2C addresses (0x08 to 0x77) on `/dev/i2c-1` by attempting to read one byte from each address. Print a grid showing which addresses respond with an ACK. Compare your output to `i2cdetect -y 1` to verify correctness.
 </Card>
 
 <Card title="Exercise 4: SPI Sensor Integration" icon="rocket">

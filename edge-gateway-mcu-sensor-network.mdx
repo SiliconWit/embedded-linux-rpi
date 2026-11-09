@@ -25,11 +25,11 @@ import { Card, CardGrid, Badge, Steps, LinkButton, FileTree } from '@astrojs/sta
 
 import EmbeddedLinuxRpiComments from '../../../../components/embedded-linux-rpi/EmbeddedLinuxRpiComments.astro';
 
-The previous eight lessons taught you to cross-compile, build custom kernels, write device trees, develop kernel modules, create Buildroot and Yocto images, and manage system services. In this final lesson, you combine all of those skills into a single deployable product: an edge gateway that collects sensor data from the MCU nodes you built in the ESP32, RPi Pico, and STM32 courses, stores it locally, serves a live dashboard, and forwards selected data to the cloud. This project does things that microcontrollers cannot handle and does them more reliably than stock Raspberry Pi OS ever could in a deployed environment. #EdgeGateway #EmbeddedLinux #IoT
+Ten sensor nodes in a greenhouse or a workshop each hold a reading for a moment and then forget it. Nobody can see what the temperature was last night, compare two rooms, or learn that one node went silent three days ago. If every node sends its readings straight to a remote server, the site also loses its record whenever the internet link fails. An edge gateway is a small computer on the site that all the nodes report to. It keeps the record, shows it on a local web page, and passes a copy to a remote platform when the link is up. In this last lesson of the course you build one on the Raspberry Pi Zero 2 W, for the ESP32, RPi Pico and STM32 nodes of the microcontroller courses, with the kernel, image and service skills of the earlier lessons. #EdgeGateway #EmbeddedLinux #IoT
+
+The nodes send their readings over Wi-Fi with MQTT, a light messaging protocol, to one program on the gateway. Everything else on the gateway takes its data from that program.
 
 ```text
-  Edge Gateway Architecture
-  ──────────────────────────────────────────
   Sensor Nodes            RPi Zero 2 W
   ────────────           ──────────────────
   ┌──────────┐  WiFi     ┌──────────────┐
@@ -49,7 +49,15 @@ The previous eight lessons taught you to cross-compile, build custom kernels, wr
 ## What We Are Building
 
 <Card title="Edge Gateway: RPi Zero 2 W as MCU Network Hub" icon="star">
-A complete edge gateway running on a custom Yocto image for the Raspberry Pi Zero 2 W. The gateway runs a Mosquitto MQTT broker that receives sensor data from ESP32 and RPi Pico nodes over Wi-Fi. Incoming readings are stored in a SQLite database (capable of holding months of history). A Python Flask web server provides live charts via Chart.js. A USB webcam capture service takes snapshots when sensor thresholds are exceeded. An MQTT bridge forwards aggregated data to a cloud broker. All services are managed by systemd with watchdog recovery.
+An edge gateway on your own Yocto image for the Raspberry Pi Zero 2 W. It has five parts:
+
+- A Mosquitto MQTT broker. A broker works like a post office: nodes hand it messages, and it delivers them to every program that asked for them.
+- A data logger that stores each reading in a SQLite database, with room for months of history.
+- A web page (Python Flask and Chart.js) that shows live charts.
+- A USB webcam service that takes a picture when a reading goes outside its limits.
+- An MQTT bridge that forwards a copy of the data to a remote broker.
+
+systemd manages all of them and starts them again after a failure.
 </Card>
 
 **System specifications:**
@@ -57,48 +65,30 @@ A complete edge gateway running on a custom Yocto image for the Raspberry Pi Zer
 | Parameter | Value |
 |-----------|-------|
 | Gateway hardware | Raspberry Pi Zero 2 W (BCM2710A1, Cortex-A53, AArch64) |
-| Base image | Custom Yocto (Scarthgap) from Lesson 8's meta-siliconwit-rpi |
-| MQTT broker | Mosquitto 2.x |
-| Database | SQLite 3 |
-| Web framework | Python Flask + Chart.js |
+| Base image | Custom Yocto (Scarthgap), from the meta-siliconwit-rpi layer of the Yocto lesson |
+| MQTT broker | Mosquitto 2.x, port 1883 |
+| Dashboard | Python Flask + Chart.js, port 5000 |
 | Camera | USB webcam via fswebcam / v4l2 |
 | Cloud forwarding | MQTT bridge (mosquitto-bridge) + REST API |
-| Service manager | systemd with watchdog |
-| Sensor nodes | ESP32 (Lesson series), RPi Pico (Lesson series), STM32 (Lesson series) |
+| Sensor nodes | ESP32, RPi Pico and STM32 nodes from their own courses |
 | Protocol | MQTT v3.1.1 over Wi-Fi |
 
-### Services Overview
-
-| Service | Port | Description |
-|---------|------|-------------|
-| mosquitto | 1883 | MQTT broker accepting sensor node connections |
-| gateway-datalogger | (internal) | Subscribes to MQTT topics, writes to SQLite, triggers camera |
-| gateway-dashboard | 5000 | Flask web server with live charts and REST API |
-| gateway-camera | (triggered) | Captures JPEG snapshots on threshold events |
-| mosquitto-bridge | (outbound) | Forwards selected topics to cloud broker |
+A message takes two paths from the broker. One goes to the local record and the web page. The other goes to the remote broker. When a reading is outside its limits, the data logger also calls the camera service, which saves a JPEG picture.
 
 ```text
-  Gateway Data Flow
-  ──────────────────────────────────────────
-  MQTT msg in ──► Mosquitto (port 1883)
+  nodes ──MQTT──► Mosquitto (port 1883)
                       │
-         ┌────────────┼────────────┐
-         ▼            ▼            ▼
-  gateway-      gateway-     mosquitto-
-  datalogger    dashboard    bridge
-    │              │              │
-    ▼              ▼              ▼
-  SQLite DB    Flask+Chart.js  Cloud broker
-  (local       (port 5000)    (remote MQTT)
-   history)        │
-    │              ▼
-    │           Browser
-    │
-    ▼ threshold exceeded?
-  gateway-camera
-    │
-    ▼
-  JPEG snapshot saved
+            ┌─────────┴─────────┐
+            ▼                   ▼
+     gateway-datalogger    mosquitto-bridge
+            │                   │
+            ▼                   ▼
+        SQLite DB          Cloud broker
+       (local history)     (remote MQTT)
+            │
+            ▼
+     gateway-dashboard ──► Browser
+     (Flask, port 5000)
 ```
 
 ## Why This Cannot Run on a Microcontroller
@@ -106,7 +96,7 @@ A complete edge gateway running on a custom Yocto image for the Raspberry Pi Zer
 <InArticleAd />
 
 
-The ESP32, STM32, and RPi Pico are excellent sensor nodes, but they cannot serve as a full gateway. Here is a concrete comparison of what this gateway does versus what a microcontroller can realistically handle:
+The ESP32, STM32, and RPi Pico are good sensor nodes: they start in milliseconds, answer in microseconds, and run for years. They cannot be the gateway, because the gateway needs a filesystem, several programs at once, and much more memory:
 
 | Capability | RPi Zero 2 W Gateway | Typical MCU (ESP32/STM32/Pico) |
 |-----------|----------------------|-------------------------------|
@@ -115,59 +105,51 @@ The ESP32, STM32, and RPi Pico are excellent sensor nodes, but they cannot serve
 | USB webcam capture | USB host + v4l2 + fswebcam | No USB host stack, no camera drivers |
 | Run multiple isolated services | systemd process isolation | Single firmware, no process isolation |
 | SSH remote access | Full OpenSSH server | No SSH, only serial or basic telnet |
-| Python runtime | CPython 3.x with pip packages | MicroPython (limited), no pip |
-| Log rotation and storage | journald + logrotate on ext4 | Limited flash, no log rotation |
-| OTA with rollback | A/B root partitions (Lesson 8) | Basic OTA, risky rollback |
-| TLS certificate management | OpenSSL with full cert store | Minimal TLS, limited cert storage |
+| OTA with rollback | A/B root partitions (from the Yocto lesson) | Basic OTA, risky rollback |
 
-The RPi Zero 2 W sits at the boundary between microcontrollers and full servers. It has enough resources to run Linux with real services, but it draws under 1 W at idle, costs under 20 USD, and fits in the same enclosures as an MCU board.
+The RPi Zero 2 W stands between a microcontroller and a server. It runs Linux with real services, but it draws under 1 W at idle, costs under 20 USD, and fits in the same enclosure as an MCU board.
+
+The reverse is just as true: the gateway must not take over the work of the nodes. Linux can pause for milliseconds, a Wi-Fi link can drop for minutes, and a remote platform can be out of reach for hours. So each layer keeps the work it can do without the layer above:
+
+- **The node** reads the sensor and keeps every fast control loop and every safety limit in its own firmware. It must stay safe with the gateway switched off.
+- **The gateway** records, compares, displays and raises alerts for the site.
+- **The remote platform** is for oversight: alerts to people who are away, long records, and the comparison of several sites.
 
 ## Why Not Just Use Raspberry Pi OS?
 
 <InArticleAd />
 
 
-You could install Raspberry Pi OS, `apt install mosquitto python3-flask`, and build this gateway in an afternoon. So why spend eight lessons learning to build a custom image? Because Raspberry Pi OS fails in every way that matters for a deployed product:
+You could install Raspberry Pi OS, run `apt install mosquitto python3-flask`, and have this gateway working in an afternoon. Raspberry Pi OS is made for a desk, where a person is near to repair it. A gateway in the field, with nobody near, has four problems with it:
 
 <CardGrid>
   <Card title="Power Loss Corruption" icon="warning">
-    Raspberry Pi OS writes to the SD card continuously (logs, swap, temp files). When power cuts unexpectedly (common in industrial, agricultural, and remote deployments), the ext4 filesystem often corrupts. Your gateway is now bricked until someone physically re-flashes the card. Our custom image uses a **read-only root filesystem** that cannot corrupt, no matter when power is lost.
+    Raspberry Pi OS writes to the SD card all the time (logs, swap, temporary files). When the power fails during a write, the filesystem can be damaged, and the gateway then does not start until somebody writes a new card. The image of this course uses a **read-only root filesystem**, which is never written and so cannot be damaged by a power cut.
   </Card>
 
-  <Card title="30-Second Boot vs 4-Second Boot" icon="warning">
-    Raspberry Pi OS takes 25 to 40 seconds to boot. During a power blip in a greenhouse, factory, or server room, your monitoring is blind for half a minute. Our custom kernel (Lesson 2) boots in under 4 seconds. Sensor data resumes almost immediately.
+  <Card title="A Slow Start after Every Power Cut" icon="warning">
+    Raspberry Pi OS takes 25 to 40 seconds to boot, because it starts many services that a gateway does not need. During that time nothing is recorded. An image that holds only your services, on the kernel you configured yourself, has much less to start.
   </Card>
 
-  <Card title="2 to 4 GB Image vs 32 MB Image" icon="warning">
-    Need to deploy 50 gateways? With Raspberry Pi OS, you are cloning a 2 to 4 GB image per device (Lite to Desktop), manually configuring each one, and hoping nothing drifts. Our Yocto image is 32 MB, built from version-controlled metadata, byte-for-byte identical every build, and deployable via OTA.
+  <Card title="Fifty Devices That Should Be Identical" icon="warning">
+    With Raspberry Pi OS you copy an image of 2 to 4 GB to each device, configure each one by hand, and hope that none of them differs. The Yocto image is built from files in version control, so every device gets the same image, and you can build it again a year later.
   </Card>
 
   <Card title="No OTA, No Rollback" icon="warning">
-    Raspberry Pi OS has no built-in over-the-air update mechanism. Running `apt upgrade` on a remote device can break things with no way back. Our A/B root partition layout (Lesson 8) writes updates to the inactive partition, switches on reboot, and automatically rolls back if the new image fails to boot.
+    Raspberry Pi OS has no built-in way to update a device over the network (OTA, over the air) and return if the update fails. An `apt upgrade` on a remote device can leave it broken. The A/B layout of the Yocto lesson writes the update to the unused partition, starts from it on the next boot, and returns to the old partition if the new image does not start.
   </Card>
 </CardGrid>
 
-| Scenario | Raspberry Pi OS | Custom Embedded Linux (This Course) |
-|----------|----------------|-------------------------------------|
-| Sudden power loss | SD card corruption risk | Read-only root, always safe |
-| Boot time after power cut | 25 to 40 seconds | Under 4 seconds |
-| Deploy 50 identical devices | Manual setup each | One Yocto image, reproducible |
-| Remote firmware update | apt upgrade (risky, no rollback) | A/B OTA with automatic rollback |
-| Attack surface | 1,500+ packages, package manager | Only your services, no package manager |
-| License compliance for shipping | Unknown, unaudited | Yocto generates full license manifest |
-| Disk image size | 2 to 4 GB | 32 MB |
-| RAM at idle | 200+ MB (desktop, services) | Under 40 MB |
-
-This is the difference between a hobby project and a deployable product. The eight lessons in this course taught you how to build that product. This capstone puts it all together.
+Two more differences matter when you ship a product. Raspberry Pi OS carries more than 1,500 packages and a package manager, and each is a possible way in for an attacker, while your image holds only your services. And Yocto lists the license of everything in the image, which a hand-built system does not.
 
 ## System Architecture
 
 <InArticleAd />
 
 
-The gateway sits between your MCU sensor nodes and the cloud. Here is the data flow through the entire system:
+The gateway stands between your MCU sensor nodes and the remote platform.
 
-**Sensor nodes (ESP32, RPi Pico)** publish JSON readings to MQTT topics over Wi-Fi. Each node connects to the gateway's Mosquitto broker at `tcp://gateway-ip:1883` and publishes to topics like `sensor/esp32-01/temperature` and `sensor/pico-01/humidity`.
+**Sensor nodes (ESP32, RPi Pico)** send each reading as JSON (a text format of names and values) over Wi-Fi. A node connects to the gateway's Mosquitto broker at `tcp://gateway-ip:1883` and publishes each message under a topic. A topic is a label that looks like a path, such as `sensor/esp32-01/temperature`. A program that wants messages subscribes to a topic, and `sensor/#` means "every topic that starts with `sensor/`".
 
 **On the gateway**, five components work together:
 
@@ -177,49 +159,16 @@ The gateway sits between your MCU sensor nodes and the cloud. Here is the data f
 4. **Camera capture service** (Python) uses fswebcam to take a JPEG snapshot from a USB webcam when triggered by the data logger. Images are stored locally with timestamps.
 5. **MQTT bridge** (Mosquitto bridge configuration) forwards selected topics to a cloud MQTT broker for remote monitoring and long-term storage.
 
-All five services are managed by systemd, which handles startup ordering, automatic restarts, and watchdog monitoring.
+systemd manages all five. It starts them in order, restarts one that fails, and watches the data logger with a watchdog.
 
-```
-┌─────────────────────────────────────────────────────────────────────┐
-│                    RPi Zero 2 W Gateway                             │
-│                                                                     │
-│  ┌──────────────┐    ┌──────────────┐    ┌───────────────────────┐  │
-│  │  Mosquitto   │───>│ Data Logger  │───>│  SQLite Database      │  │
-│  │  MQTT Broker │    │ (Python)     │    │  /var/lib/gateway/    │  │
-│  │  :1883       │    │              │    │  sensor_data.db       │  │
-│  └──────┬───────┘    └──────┬───────┘    └───────────┬───────────┘  │
-│         │                   │                        │              │
-│         │            ┌──────v───────┐    ┌───────────v───────────┐  │
-│         │            │ Camera       │    │  Web Dashboard        │  │
-│         │            │ Capture      │    │  Flask + Chart.js     │  │
-│         │            │ (fswebcam)   │    │  :5000                │  │
-│         │            └──────────────┘    └───────────────────────┘  │
-│         │                                                           │
-│  ┌──────v───────┐                                                   │
-│  │ MQTT Bridge  │──────> Cloud MQTT Broker                          │
-│  │ (forward)    │        (mqtt.siliconwit.io)                       │
-│  └──────────────┘                                                   │
-└─────────────────────────────────────────────────────────────────────┘
-
-    ▲              ▲              ▲
-    │ MQTT         │ MQTT         │ MQTT
-    │              │              │
-
-┌────────┐    ┌────────┐    ┌────────┐
-│ ESP32  │    │ RPi    │    │ STM32  │
-│ Node 1 │    │ Pico   │    │ Node   │
-│        │    │ Node 1 │    │ (UART) │
-└────────┘    └────────┘    └────────┘
-```
-
-The STM32 node connects via UART to one of the Wi-Fi-capable nodes (or through a USB-serial link to the gateway directly), since the STM32F103 does not have built-in Wi-Fi.
+The STM32F103 has no Wi-Fi of its own. The STM32 node connects by UART to one of the Wi-Fi nodes, or by a USB-serial link directly to the gateway.
 
 ## Project Directory Structure
 
 <InArticleAd />
 
 
-This is the complete project layout on your development machine. All source files, configuration, systemd units, and the Yocto recipe live in a single repository:
+The whole project is one repository on your development machine: source files, configuration, systemd units, and the Yocto recipe.
 
 <FileTree>
 - edge-gateway/
@@ -259,9 +208,11 @@ This is the complete project layout on your development machine. All source file
 <InArticleAd />
 
 
-Mosquitto is a lightweight MQTT broker that runs comfortably on the RPi Zero 2 W. It handles the publish/subscribe messaging between sensor nodes and the gateway services.
+Without a broker, every node would need the address of every program that wants its data, and one new program would mean new firmware on every node. With a broker, a node knows one address. Mosquitto is a small MQTT broker that the RPi Zero 2 W runs with ease.
 
 ### Mosquitto Configuration
+
+Three settings matter most. `allow_anonymous false` refuses any client without a user name and password. `persistence true` keeps waiting messages across a restart of the broker. `max_queued_messages` limits how many messages the broker holds for a client that is not connected.
 
 ```bash title="mqtt/mosquitto.conf"
 # Mosquitto configuration for edge gateway
@@ -296,7 +247,7 @@ include_dir /etc/mosquitto/conf.d
 
 ### Access Control List
 
-The ACL file controls which clients can publish and subscribe to which topics:
+A password says who a client is. The ACL (access control list) says what that client may do. Without it, one stolen password could publish false readings under the name of every node. Here each node may write only under its own topic:
 
 ```bash title="mqtt/acl.conf"
 # Sensor nodes can only publish to their own topic subtree
@@ -326,7 +277,7 @@ topic write cloud/#
 
 ### Creating Password File
 
-Generate the Mosquitto password file with hashed credentials:
+Create the Mosquitto password file. It stores a hash of each password, not the password itself. The passwords in the examples of this lesson (`datalogger_pass`, `esp32_pass`) are placeholders: choose your own, and keep the password file out of your repository. Port 1883 is not encrypted, so use it only on a network you control.
 
 ```bash
 # Create each user (you will be prompted for a password)
@@ -350,25 +301,25 @@ Wants=network-online.target
 [Service]
 Type=notify
 NotifyAccess=main
-ExecStartPre=/usr/sbin/mosquitto -t -c /etc/mosquitto/mosquitto.conf
 ExecStart=/usr/sbin/mosquitto -c /etc/mosquitto/mosquitto.conf
 ExecReload=/bin/kill -HUP $MAINPID
 Restart=on-failure
 RestartSec=5
-WatchdogSec=30
 
 # Security hardening
 User=mosquitto
 Group=mosquitto
 ProtectSystem=strict
 ProtectHome=true
-ReadWritePaths=/var/lib/mosquitto /var/log/mosquitto
+ReadWritePaths=/var/lib/mosquitto -/var/log/mosquitto
 NoNewPrivileges=true
 PrivateTmp=true
 
 [Install]
 WantedBy=multi-user.target
 ```
+
+Mosquitto 2.0 tells systemd when it is ready (`Type=notify`), but it does not send watchdog keepalive messages, so this unit has no `WatchdogSec=`: with it, systemd would stop the broker every time the timeout expired. The dash in front of `/var/log/mosquitto` lets the unit start when that directory does not exist.
 
 ### Testing the Broker
 
@@ -388,16 +339,18 @@ mosquitto_pub -h localhost -u esp32-node-01 -P esp32_pass \
     -m '{"device_id":"esp32-01","sensor":"bme280","type":"temperature","value":23.5,"unit":"C","ts":1710000000}'
 ```
 
-You should see the message appear in the subscriber terminal. This confirms that authentication, ACLs, and message routing are all working.
+The message appears in the subscriber terminal. That shows that the passwords, the ACL and the delivery all work. Now publish the same message to `sensor/esp32-02/temperature` as `esp32-node-01`. Nothing appears, and the publisher reports no error: the broker drops a message that the ACL does not allow, without telling the sender.
 
 ## The Data Logger Service
 
 <InArticleAd />
 
 
-The data logger is the core service that bridges MQTT messages to persistent storage. It subscribes to all sensor topics, parses JSON payloads, inserts rows into SQLite, checks thresholds for camera triggers, and optionally forwards data to the cloud.
+The broker delivers messages and then forgets them. The data logger is the program that makes a record. It subscribes to all sensor topics and writes every reading into a database on the card.
 
 ### Python Data Logger
+
+Read `on_message()` first: it runs once for every message. It turns the JSON text into values and rejects a message that is not valid, stores the reading with `insert_reading()`, calls the camera if `check_threshold()` finds the value outside its limits, and passes a copy to the remote broker. The rest of the file is setup.
 
 ```python title="datalogger/gateway_datalogger.py"
 #!/usr/bin/env python3
@@ -410,6 +363,7 @@ triggers camera capture on threshold events, and forwards to cloud.
 import json
 import os
 import signal
+import socket
 import sqlite3
 import subprocess
 import sys
@@ -452,10 +406,25 @@ def signal_handler(signum, frame):
 signal.signal(signal.SIGTERM, signal_handler)
 signal.signal(signal.SIGINT, signal_handler)
 
+def sd_notify(state):
+    """Send a state string to systemd. Does nothing when not started by systemd."""
+    addr = os.environ.get("NOTIFY_SOCKET")
+    if not addr:
+        return
+    if addr.startswith("@"):
+        addr = "\0" + addr[1:]
+    try:
+        with socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM) as sock:
+            sock.sendto(state.encode(), addr)
+    except OSError:
+        pass
+
 def init_database(db_path):
     """Create the database and tables if they do not exist."""
     os.makedirs(os.path.dirname(db_path), exist_ok=True)
-    conn = sqlite3.connect(db_path)
+    # The connection is created here but used from the MQTT network thread
+    # (on_message), so the same-thread check must be switched off
+    conn = sqlite3.connect(db_path, check_same_thread=False)
     cursor = conn.cursor()
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS readings (
@@ -524,7 +493,7 @@ def trigger_camera(conn, device_id, sensor_type, value):
             capture_output=True,
         )
         print(f"Camera snapshot saved: {filepath}", flush=True)
-    except (subprocess.CalledProcessError, FileNotFoundError) as e:
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, FileNotFoundError) as e:
         print(f"Camera capture failed: {e}", flush=True)
         filepath = ""
 
@@ -644,6 +613,7 @@ def main():
 
     # Main loop: keep running until signaled to stop
     while running:
+        sd_notify("WATCHDOG=1")  # WatchdogSec=60 in the unit file expects this
         time.sleep(1)
 
     # Cleanup
@@ -705,16 +675,20 @@ CPUQuota=25%
 WantedBy=multi-user.target
 ```
 
-The `EnvironmentFile=-/etc/gateway/cloud.env` line (note the dash prefix) means the file is optional. If it exists, it provides `CLOUD_BROKER`, `CLOUD_USER`, and `CLOUD_PASS` environment variables. If it does not exist, the service starts without cloud forwarding.
+The dash in `EnvironmentFile=-/etc/gateway/cloud.env` makes the file optional. If it exists, it provides the `CLOUD_BROKER`, `CLOUD_USER`, and `CLOUD_PASS` environment variables. If it does not exist, the service starts without cloud forwarding. Passwords belong in a file like this, readable only by the service, and not in the source code. For a real device, move `MQTT_PASS` there too.
+
+`WatchdogSec=60` works only because the main loop of the logger sends `WATCHDOG=1` to systemd every second through its `sd_notify()` helper. A service that sets `WatchdogSec=` and never sends this message is killed each time the timeout expires.
 
 ## SQLite Database Schema
 
 <InArticleAd />
 
 
-SQLite is the right database for an edge gateway. It requires no server process, stores everything in a single file, handles concurrent reads safely, and works with the standard Python `sqlite3` module that ships with CPython. On the RPi Zero 2 W with 512 MB of RAM, SQLite can comfortably hold millions of rows.
+A text log would also keep the readings, but a question such as "the average temperature of each node for each day" would need a program of its own. A database answers it in one query. Most databases are servers that need memory and care. SQLite is a library inside your program, and the whole database is one file. Several programs can read that file at the same time, and Python includes the `sqlite3` module. On the RPi Zero 2 W it holds millions of rows.
 
 ### Schema Definition
+
+The schema is the list of tables and their columns. `readings` gets one row for each value a node sends, and `events` one row each time a value is outside its limits. An index lets SQLite find rows by time or by device without reading the whole table.
 
 ```sql title="schema/init_db.sql"
 -- Sensor readings table
@@ -760,13 +734,15 @@ sqlite3 /var/lib/gateway/sensor_data.db < schema/init_db.sql
 
 ### Useful Queries
 
+The logger stores timestamps as ISO 8601 text with a `T` between the date and the time (for example `2026-03-12T14:30:22.123456+00:00`), so the queries build the cutoff with `strftime()` in the same form. SQLite's `datetime('now', ...)` puts a space there, and a text comparison against it treats every row of the cutoff day as newer than the cutoff.
+
 Query the last hour of temperature readings:
 
 ```sql
 SELECT timestamp, device_id, value, unit
 FROM readings
 WHERE sensor_type = 'temperature'
-  AND timestamp >= datetime('now', '-1 hour')
+  AND timestamp >= strftime('%Y-%m-%dT%H:%M:%S', 'now', '-1 hour')
 ORDER BY timestamp DESC;
 ```
 
@@ -792,21 +768,21 @@ SELECT DISTINCT device_id,
        MAX(timestamp) AS last_seen,
        COUNT(*) AS total_readings
 FROM readings
-WHERE timestamp >= datetime('now', '-10 minutes')
+WHERE timestamp >= strftime('%Y-%m-%dT%H:%M:%S', 'now', '-10 minutes')
 GROUP BY device_id
 ORDER BY last_seen DESC;
 ```
 
-Storage estimation: each reading row is roughly 150 bytes. At one reading per sensor per minute with 3 sensors on 2 nodes, that is 6 rows per minute, 8,640 per day, about 1.3 MB per day. A 4 GB data partition can hold over 8 years of data at this rate.
+Storage estimation: each reading row is roughly 150 bytes. At one reading per sensor per minute with 3 sensors on 2 nodes, that is $3 \times 2 = 6$ rows per minute, $6 \times 1440 = 8640$ per day, about $8640 \times 150\ \text{bytes} \approx 1.3\ \text{MB}$ per day. A 4 GB data partition can hold over 8 years of data at this rate.
 
 ### Database Maintenance
 
-Over time, you may want to prune old data. A simple cron job or systemd timer handles this:
+To remove old data, run these commands from a cron job or a systemd timer:
 
 ```bash
 # Delete readings older than 90 days
 sqlite3 /var/lib/gateway/sensor_data.db \
-    "DELETE FROM readings WHERE timestamp < datetime('now', '-90 days');"
+    "DELETE FROM readings WHERE timestamp < strftime('%Y-%m-%dT%H:%M:%S', 'now', '-90 days');"
 
 # Reclaim disk space
 sqlite3 /var/lib/gateway/sensor_data.db "VACUUM;"
@@ -817,9 +793,11 @@ sqlite3 /var/lib/gateway/sensor_data.db "VACUUM;"
 <InArticleAd />
 
 
-The dashboard gives you a browser-based view of all sensor data. It reads from the same SQLite database that the data logger writes to. Flask serves both the HTML page (with embedded Chart.js) and a set of REST API endpoints.
+The dashboard is a small web server on the gateway, so any phone or PC on the local network can see the readings in a browser, also when the internet link is down. It reads the same SQLite file that the data logger writes. Flask, a small Python web framework, serves the HTML page and a set of addresses that return data as JSON (a REST API).
 
 ### Flask Application
+
+Every function under an `@app.route(...)` line follows one pattern: open the database, run one SQL query, and return the rows as JSON.
 
 ```python title="dashboard/gateway_dashboard.py"
 #!/usr/bin/env python3
@@ -896,7 +874,7 @@ def api_history():
     query = """
         SELECT device_id, sensor_type, value, unit, timestamp
         FROM readings
-        WHERE timestamp >= datetime('now', ?)
+        WHERE timestamp >= strftime('%Y-%m-%dT%H:%M:%S', 'now', ?)
     """
     params = [f"-{hours} hours"]
 
@@ -1023,7 +1001,7 @@ if __name__ == "__main__":
 
 ### Dashboard HTML Template
 
-The HTML template uses Chart.js from a CDN to render live charts. It fetches data from the REST API endpoints and updates the charts periodically:
+Most of the page is styling. Read the script at the end: every 10 seconds `refreshAll()` asks the API for new data and draws it again. A node counts as silent when it was last heard more than 120 seconds ago. The page loads Chart.js from the internet (a CDN). For a site with no internet link, copy the Chart.js file into `static/` and load it from there.
 
 ```html title="dashboard/templates/index.html"
 <!DOCTYPE html>
@@ -1304,14 +1282,14 @@ CPUQuota=20%
 WantedBy=multi-user.target
 ```
 
-Notice that the dashboard service uses `ReadOnlyPaths` for the database directory. It only needs to read the SQLite file; the data logger handles all writes.
+The dashboard service has `ReadOnlyPaths` for the database directory. It only reads the SQLite file, and the data logger does all the writing, so a fault in the web server cannot damage the record.
 
 ## USB Camera Capture
 
 <InArticleAd />
 
 
-One of the clearest advantages of embedded Linux over a microcontroller is USB host support. The RPi Zero 2 W can drive a standard USB webcam through the v4l2 (Video4Linux2) subsystem that is built into the kernel. No special drivers are needed for UVC-compliant cameras (which covers most USB webcams sold today).
+A reading tells you that something happened. A picture often tells you what: a door left open, a pipe that leaks, a person in the room. The RPi Zero 2 W can use an ordinary USB webcam through v4l2 (Video4Linux2), the camera part of the kernel. Most USB webcams follow the UVC standard (USB Video Class) and need no extra driver.
 
 ### Installing fswebcam
 
@@ -1328,6 +1306,8 @@ fswebcam -r 640x480 --no-banner test.jpg
 ```
 
 ### Camera Capture Script
+
+The script runs the `fswebcam` command. Its argument is the path of the output file, and its exit code tells the data logger whether the picture was saved.
 
 ```python title="camera/gateway_camera.py"
 #!/usr/bin/env python3
@@ -1403,18 +1383,7 @@ sudo cp camera/gateway_camera.py /usr/bin/gateway-camera-capture
 
 ### How It Integrates
 
-The data logger calls the camera capture script whenever a threshold is exceeded. Looking back at the `trigger_camera()` function in `gateway_datalogger.py`:
-
-```python
-subprocess.run(
-    [CAMERA_SCRIPT, filepath],
-    timeout=10,
-    check=True,
-    capture_output=True,
-)
-```
-
-This executes `gateway-camera-capture /var/lib/gateway/snapshots/alert_esp32-01_temperature_20260312_143022.jpg`. The snapshot is saved to disk and the event is recorded in the `events` table, which the dashboard displays.
+Each time a reading is outside its limits, the `trigger_camera()` function of the data logger runs a command such as `gateway-camera-capture /var/lib/gateway/snapshots/alert_esp32-01_temperature_20260312_143022.jpg`. The snapshot is saved to disk and the event is recorded in the `events` table, which the dashboard displays.
 
 ### Why This Cannot Run on an MCU
 
@@ -1423,21 +1392,25 @@ A USB webcam requires:
 - A USB host controller with the full USB protocol stack
 - The UVC (USB Video Class) driver in the kernel
 - The v4l2 subsystem for camera enumeration and frame capture
-- Enough RAM to buffer at least one full frame (640x480 at 24-bit color is 900 KB)
+- Enough RAM to buffer at least one full frame ($640 \times 480 \times 3\ \text{bytes} \approx 900\ \text{KB}$ at 24-bit color)
 - A filesystem to write the JPEG file to
 
-The ESP32 has a USB peripheral, but it operates in device mode (not host mode). The STM32F103 has no USB host support. The RPi Pico has USB but lacks the memory and OS infrastructure for UVC. Only an embedded Linux system provides all of these components out of the box.
+The original ESP32 has no native USB peripheral at all. The STM32F103 has no USB host support. The RPi Pico has USB but lacks the memory and the operating system parts for UVC. An embedded Linux system has all of these parts already.
 
 ## Cloud Forwarding
 
 <InArticleAd />
 
 
-The gateway can forward sensor data to any cloud MQTT broker for remote monitoring, long-term archival, alerting, and analytics. The examples in this lesson use [SiliconWit.io](https://siliconwit.io), which accepts MQTT on `mqtt.siliconwit.io:8883` (TLS) and provides live dashboards, configurable alerts (email, SMS, Discord, Slack, Telegram), remote device control, anomaly detection, and a REST API for custom integrations. The free tier supports 3 devices with 7-day data retention, enough to complete this lesson. You can substitute any MQTT broker (HiveMQ, EMQX, AWS IoT Core, your own Mosquitto instance) by changing the broker address and credentials. There are two approaches to forwarding: Mosquitto's built-in bridge, and application-level REST forwarding.
+The local dashboard serves people on the site. An owner in another town, or a team with several sites, needs the readings somewhere they can reach, with an alert when a value is wrong and nobody is near. That is the work of a remote platform. It watches and records. It does not replace the limits in the nodes, and the site must keep working when the link is down.
+
+The gateway can forward sensor data to any cloud MQTT broker. The examples in this lesson use [SiliconWit.io](https://siliconwit.io), which accepts MQTT on `mqtt.siliconwit.io:8883` (TLS) and provides live dashboards, configurable alerts (email, SMS, Discord, Slack, Telegram), remote device control, anomaly detection, and a REST API for custom integrations. The free tier supports 3 devices with 7-day data retention, enough to complete this lesson.
+
+You can use any other MQTT broker (HiveMQ, EMQX, AWS IoT Core, your own Mosquitto instance) by changing the broker address and credentials. There are two ways to forward: the bridge built into Mosquitto, and a program of your own that sends the data over HTTP.
 
 ### Mosquitto Bridge Configuration
 
-The Mosquitto bridge creates a persistent connection from your local broker to a remote broker and automatically forwards messages matching specified topic patterns:
+A bridge is a connection that the local broker itself opens to a remote broker. Mosquitto then forwards every message whose topic matches the patterns you list, and no extra program is needed. The device ID and access token in the file are placeholders for the values the platform gives you:
 
 ```bash title="mqtt/bridge.conf"
 # Bridge to cloud MQTT broker
@@ -1467,8 +1440,8 @@ cleansession false
 keepalive_interval 60
 restart_timeout 10 30
 
-# Throttle: max 100 messages per second to cloud
-# (prevents flooding during reconnection with queued messages)
+# Limit the size of each message sent to the cloud to 4096 bytes
+# (this is a size limit; the bridge has no message rate throttle)
 bridge_max_packet_size 4096
 
 # Notification topic (publishes connection status)
@@ -1478,9 +1451,13 @@ notification_topic gateway/rpi-01/status
 
 With this configuration, a message published locally on `sensor/esp32-01/temperature` arrives at SiliconWit.io under your device's data topic. The `out` direction means messages flow from local to remote only. Change to `both` and add a subscribe topic (`d/your_device_id/c/#`) if you want to receive commands from the cloud, for example to toggle a relay or adjust a threshold remotely through the SiliconWit.io dashboard.
 
+Treat a remote command as a request that may arrive late or not at all. The node that receives it checks it against its own limits before it acts, and it keeps those limits when no command comes.
+
+**Published does not mean received.** A node that publishes does not learn whether a subscriber got the message. When the internet link is down, the bridge holds the QoS 1 messages in a queue and sends them after it connects again, because `cleansession false` keeps the session. The queue holds `max_queued_messages` messages, and the broker drops what arrives after it is full. The complete record is the SQLite database on the gateway. To know that the remote side is up to date, compare its newest reading with the newest row in the local database.
+
 ### REST API Forwarding (Alternative)
 
-If your cloud platform uses a REST API instead of MQTT (for example, a time-series database or a custom backend), you can add an HTTP forwarding path. Here is a standalone forwarder that reads from the SQLite database and posts batches to an HTTP endpoint:
+Some platforms take data over HTTP and not over MQTT (for example, a time-series database or a backend of your own). The forwarder below is a separate program. Once a minute it reads up to 50 rows that it has not yet sent from the SQLite database and posts them to an HTTP address. It moves its marker `last_id` forward only after the server answers with success, so after an outage it continues where it stopped:
 
 ```python title="forward_rest.py"
 #!/usr/bin/env python3
@@ -1563,7 +1540,7 @@ if __name__ == "__main__":
     main()
 ```
 
-This approach works with any HTTP-based cloud service and does not require MQTT support on the cloud side. The state file ensures no readings are sent twice, even across service restarts.
+This method works with any cloud service that accepts HTTP. The state file ensures no readings are sent twice, even across service restarts.
 
 If you are using [SiliconWit.io](https://siliconwit.io), your data appears on the dashboard automatically once the bridge connects: live charts, threshold alerts, and remote device control work without any additional cloud code. If you are using a different broker, the MQTT messages arrive in the same standard format and can be consumed by any subscriber.
 
@@ -1572,9 +1549,11 @@ If you are using [SiliconWit.io](https://siliconwit.io), your data appears on th
 <InArticleAd />
 
 
-To deploy this gateway as a reproducible, flashable image, package everything into a BitBake recipe that extends the meta-siliconwit-rpi layer from Lesson 8. The recipe installs all Python scripts, configuration files, and systemd units into the correct locations on the target root filesystem.
+So far the gateway is a set of files copied by hand, which nobody can repeat exactly on fifty devices. Put it in a BitBake recipe in the meta-siliconwit-rpi layer of the [Yocto lesson](/education/embedded-linux-rpi/yocto-production-images/). The recipe installs the Python scripts, configuration files and systemd units at their places in the root filesystem.
 
 ### Gateway BitBake Recipe
+
+Three things are new compared with the earlier recipes. `inherit useradd` creates the system user `gateway` that the services run as. `RDEPENDS` names everything that must be on the device at run time, from Python to Mosquitto. And there is no `do_compile()`, because Python scripts are only copied.
 
 ```python title="yocto/gateway-edge_1.0.bb"
 SUMMARY = "Edge Gateway for MCU Sensor Networks"
@@ -1600,7 +1579,13 @@ SRC_URI = " \
 
 S = "${WORKDIR}"
 
-inherit systemd
+inherit systemd useradd
+
+# The service units run as the system user "gateway"; the video group
+# gives it access to the USB camera (/dev/video0)
+USERADD_PACKAGES = "${PN}"
+USERADD_PARAM:${PN} = "--system --user-group --no-create-home \
+    --home-dir /var/lib/gateway --shell /sbin/nologin --groups video gateway"
 
 SYSTEMD_SERVICE:${PN} = " \
     gateway-datalogger.service \
@@ -1659,6 +1644,7 @@ do_install() {
     # Runtime directories
     install -d ${D}/var/lib/gateway
     install -d ${D}/var/lib/gateway/snapshots
+    chown -R gateway:gateway ${D}/var/lib/gateway
 
     # Gateway environment file placeholder
     install -d ${D}${sysconfdir}/gateway
@@ -1683,7 +1669,7 @@ CONFFILES:${PN} = " \
 
 ### Adding to the Image Recipe
 
-Extend the image recipe from Lesson 8 to include the gateway package:
+Extend the sensor image recipe of the Yocto lesson to include the gateway package. Save the file as `recipes-core/images/siliconwit-image-gateway.bb` in the layer, next to the image recipe it requires:
 
 ```python title="siliconwit-image-gateway.bb"
 SUMMARY = "SiliconWit Edge Gateway Image"
@@ -1722,10 +1708,10 @@ cd ~/yocto/poky
 source oe-init-build-env build-rpi
 
 # Copy recipe files to the layer
+mkdir -p ~/yocto/meta-siliconwit-rpi/recipes-apps/gateway-edge/files
 cp ~/edge-gateway/yocto/gateway-edge_1.0.bb \
     ~/yocto/meta-siliconwit-rpi/recipes-apps/gateway-edge/
 
-mkdir -p ~/yocto/meta-siliconwit-rpi/recipes-apps/gateway-edge/files
 cp ~/edge-gateway/datalogger/gateway_datalogger.py \
     ~/edge-gateway/dashboard/gateway_dashboard.py \
     ~/edge-gateway/dashboard/templates/index.html \
@@ -1744,14 +1730,14 @@ cp ~/edge-gateway/datalogger/gateway_datalogger.py \
 bitbake siliconwit-image-gateway
 ```
 
-The build adds roughly 5 to 10 minutes on top of the base sensor image build time, since it pulls in Python3, Flask, Mosquitto, and the camera utilities.
+The build takes about 5 to 10 minutes more than the base sensor image, because it adds Python3, Flask, Mosquitto, and the camera tools.
 
 ## Deploying and Testing
 
 <InArticleAd />
 
 
-With the image built, follow these steps to deploy and validate the complete gateway system:
+Write the image to a card, then test the path of a reading one stage at a time: node to broker, broker to database, database to web page, and gateway to cloud.
 
 <Steps>
 
@@ -1853,15 +1839,15 @@ With the image built, follow these steps to deploy and validate the complete gat
 
 9. **Verify cloud forwarding**
 
-   If you configured the MQTT bridge, subscribe to the cloud broker and check that messages arrive:
+   A message that left the gateway has not yet been shown to arrive. If you configured the MQTT bridge, subscribe to the cloud broker and check that messages arrive:
 
    ```bash
    mosquitto_sub -h mqtt.siliconwit.io -p 8883 --cafile /etc/ssl/certs/ca-certificates.crt \
-       -u your_cloud_user -P your_cloud_pass \
-       -t "gateway/rpi-01/#" -v
+       -u your_device_id -P your_access_token \
+       -t "d/your_device_id/t/#" -v
    ```
 
-   Messages from local sensor topics should appear under the `gateway/rpi-01/` prefix.
+   Messages from local sensor topics should appear under the `d/your_device_id/t/` prefix that the bridge adds, for example `d/your_device_id/t/sensor/esp32-01/temperature`. The bridge also publishes its connection state (1 or 0) on `gateway/rpi-01/status`.
 
 </Steps>
 
@@ -1870,11 +1856,11 @@ With the image built, follow these steps to deploy and validate the complete gat
 <InArticleAd />
 
 
-A gateway that runs unattended in the field needs additional protection against failures, attacks, and storage exhaustion. Apply these hardening measures before deploying to production.
+A gateway in the field has nobody near it. It must survive power cuts, attacks from the network, and a card that fills up. Apply these measures before a device leaves your bench.
 
 ### Read-Only Root Filesystem
 
-Mount the root filesystem as read-only to prevent corruption from power loss. Use a tmpfs overlay for directories that need to be writable at runtime:
+Mount the root filesystem read-only, so that a power cut cannot damage it. Directories that programs must write to at run time become tmpfs, which is a filesystem in RAM:
 
 ```bash title="/etc/fstab additions"
 # Root filesystem: read-only
@@ -1889,11 +1875,11 @@ tmpfs  /run         tmpfs  nosuid,nodev,mode=755  0  0
 /dev/mmcblk0p4  /var/lib/gateway  ext4  rw,noatime,sync  0  2
 ```
 
-The sensor database and snapshots live on the persistent data partition, which survives reboots and OTA updates (from the A/B scheme in Lesson 8).
+Everything in a tmpfs is lost at a reboot. The sensor database and the snapshots are therefore on the data partition, which keeps its contents across reboots and across the A/B updates of the Yocto lesson.
 
 ### Log Rotation
 
-Even with tmpfs for `/var/log`, configure journald to limit its memory usage:
+The log is now in RAM, and RAM is small. Limit what journald may use:
 
 ```ini title="/etc/systemd/journald.conf"
 [Journal]
@@ -1906,7 +1892,7 @@ ForwardToSyslog=no
 
 ### MQTT Rate Limiting
 
-Prevent misbehaving or compromised sensor nodes from overwhelming the broker:
+A node with a fault can publish thousands of messages a second. These limits keep one such node from filling the broker's memory. Note that the lower `max_queued_messages` also shortens the outage the bridge can cover:
 
 ```bash title="Additional mosquitto.conf settings"
 # Limit message rate per client
@@ -1920,7 +1906,7 @@ message_size_limit 4096
 
 ### Firewall Rules
 
-Use nftables (the modern replacement for iptables) to restrict network access:
+The firewall rules below (for nftables, the successor of iptables) drop every incoming connection by default, then allow SSH from anywhere and MQTT and the dashboard from the local network only. Change `192.168.1.0/24` to the address range of your own network:
 
 ```bash title="/etc/nftables.conf"
 #!/usr/sbin/nft -f
@@ -1969,7 +1955,7 @@ sudo systemctl start nftables
 
 ### SSH Hardening
 
-Restrict SSH access to key-based authentication and limit connection attempts:
+Passwords can be guessed by a program that tries thousands of them. Allow SSH login with a key only, and limit the number of attempts:
 
 ```bash title="/etc/ssh/sshd_config additions"
 PermitRootLogin prohibit-password
@@ -1991,15 +1977,16 @@ sudo apt install fail2ban
 
 ### Hardware Watchdog
 
-Enable the BCM2835 hardware watchdog to automatically reboot the system if it becomes unresponsive. The kernel module was covered in Lesson 5:
+Enable the BCM2835 hardware watchdog, the timer in the chip that reboots the board when the system stops answering. The [system services lesson](/education/embedded-linux-rpi/system-services-process-management/) explains how it works:
 
 ```bash
 # Load the watchdog module
 modprobe bcm2835_wdt
 
-# systemd watchdog integration (already in our service files)
-# WatchdogSec=60 in the service unit tells systemd to
-# send keepalive pings and restart the service if it stops
+# systemd watchdog integration (already in the data logger unit)
+# WatchdogSec=60 in the service unit tells systemd to expect a
+# keepalive message from the service at least every 60 seconds
+# and to restart the service if the messages stop
 ```
 
 For system-level watchdog (reboots the entire board if systemd itself hangs):
@@ -2011,7 +1998,7 @@ RebootWatchdogSec=60
 
 ### OTA with A/B Rollback
 
-Use the A/B root filesystem scheme from Lesson 8. When deploying a gateway update:
+Use the A/B root filesystem layout of the Yocto lesson. An update of a gateway then has these steps:
 
 1. Write the new root filesystem to the inactive partition.
 2. Switch the U-Boot boot_slot variable.
@@ -2020,7 +2007,11 @@ Use the A/B root filesystem scheme from Lesson 8. When deploying a gateway updat
 5. If the self-test passes within 60 seconds, mark the update as confirmed.
 6. If the self-test fails or the system does not boot, the watchdog triggers a reboot and U-Boot falls back to the previous partition.
 
-This ensures that a bad update never leaves the gateway permanently offline.
+A bad update then cannot leave the gateway offline for good.
+
+:::tip[Instrument it]
+This gateway is the instrumentation layer: the MCU nodes do the [sensing and actuating](/education/sensor-actuator-interfacing-stm32/), and the Pi collects, buffers, and forwards. Give the gateway itself something to report too (CPU temperature, link quality, queue depth, free disk), so you can see the health of the gateway and not only of the sensors. Point the upstream side at siliconwit.io and the whole fleet becomes one place you can [watch, alert on, and command](https://siliconwit.io), while the gateway keeps its local record when the link drops.
+:::
 
 ## What You Have Built
 
@@ -2028,39 +2019,28 @@ This ensures that a bad update never leaves the gateway permanently offline.
 
 
 <Card title="Complete Edge Gateway System" icon="star">
-Starting from bare metal in Lesson 1 and building up through eight lessons, you have now deployed a full edge gateway product. Here is every skill from the course and where it appears in this final project:
+Each skill of the course has a place in this gateway:
 
-**Lesson 1 (Cross-Compilation and Boot)**: The Yocto toolchain cross-compiles all gateway components for AArch64. The boot process loads the kernel and device tree that bring up the RPi Zero 2 W.
+**Cross-compilation and boot**: The Yocto toolchain cross-compiles all gateway components for AArch64.
 
-**Lesson 2 (Device Trees)**: The device tree enables I2C, SPI, and UART peripherals. The USB host controller entry allows the webcam to enumerate.
+**Kernel configuration**: The custom kernel includes v4l2 for the camera, USB host drivers, the networking stack, and the ext4 filesystem for the data partition.
 
-**Lesson 3 (Kernel Configuration)**: The custom kernel includes v4l2 for camera support, USB host drivers, networking stack, and the ext4 filesystem for the data partition.
+**Device trees**: The device tree enables the I2C, SPI, and UART peripherals and the USB host controller for the webcam.
 
-**Lesson 4 (Kernel Modules)**: The BCM2835 watchdog module and I2C bus drivers load at boot to support hardware watchdog and local sensor connections.
+**Userspace GPIO, I2C and SPI**: A sensor wired directly to the gateway board is read through the i2c-dev interface.
 
-**Lesson 5 (Userspace GPIO/I2C/SPI)**: Direct I2C access to local sensors (if connected to the gateway board) uses the sysfs and i2c-dev interfaces.
+**Kernel modules**: The BCM2835 watchdog module and the I2C bus drivers load at boot.
 
-**Lesson 6 (Buildroot)**: The minimal root filesystem concepts apply to keeping the gateway image lean. Buildroot can be used for rapid prototyping before moving to Yocto.
+**Buildroot**: The idea of a minimal root filesystem keeps the gateway image small.
 
-**Lesson 7 (System Services)**: Every gateway component runs as a systemd service with automatic restart, watchdog, security hardening, and structured logging through journald.
+**System services**: Every gateway component runs as a systemd service with automatic restart, reduced rights, and logging through journald.
 
-**Lesson 8 (Yocto and Production Images)**: The gateway is packaged as a BitBake recipe in the meta-siliconwit-rpi layer, built into a reproducible image with SDK support and A/B OTA updates.
+**Yocto and production images**: The gateway is a BitBake recipe in the meta-siliconwit-rpi layer, built into an image you can build again, with A/B OTA updates.
 
-**Previous courses**: The ESP32, RPi Pico, and STM32 sensor nodes that feed data into this gateway were built in the earlier courses of this series. The RTOS course provided the real-time firmware patterns used on those nodes.
+**The microcontroller courses**: The ESP32, RPi Pico, and STM32 sensor nodes come from those courses, and their real-time firmware patterns from the RTOS course.
 </Card>
 
-### The Progression
-
-| Course | Role in This System |
-|--------|-------------------|
-| Embedded Programming: STM32 | Sensor node firmware, UART communication |
-| Embedded Programming: ESP32 | Wi-Fi sensor node, MQTT client |
-| Embedded Programming: RPi Pico | Wi-Fi sensor node (Pico W), MQTT client |
-| RTOS Programming | Real-time task scheduling on sensor nodes |
-| Embedded Linux with RPi (Lessons 1 to 8) | Gateway OS, services, kernel, drivers |
-| Embedded Linux with RPi (Lesson 9) | Complete gateway integration |
-
-This is the kind of project that demonstrates the full range of embedded systems engineering. The sensor nodes handle real-time data acquisition with deterministic timing. The gateway handles data aggregation, storage, visualization, and cloud connectivity with the power of Linux. Neither layer can replace the other; they work together.
+The sensor nodes read and control with exact timing. The gateway stores, displays and forwards. Neither layer can do the work of the other.
 
 ## Exercises
 
@@ -2075,7 +2055,7 @@ This is the kind of project that demonstrates the full range of embedded systems
     Extend the gateway to send commands back to the MCU nodes. Add a `commands/#` topic tree where the dashboard can publish actuator commands (for example, turning on an LED or activating a relay). Modify the ESP32 firmware to subscribe to `commands/esp32-01/#` and execute received commands. Implement command acknowledgment so the dashboard shows whether a command was executed.
   </Card>
   <Card title="Exercise 3: LoRa Sensor Node Integration" icon="pencil">
-    Add an SX1276 LoRa module to the RPi Zero 2 W via SPI (using the kernel SPI driver from Lesson 5). Write a Python service that receives LoRa packets from a remote sensor node (placed outside Wi-Fi range) and republishes the data as MQTT messages on the local broker. This extends the gateway's range beyond Wi-Fi coverage.
+    Add an SX1276 LoRa module to the RPi Zero 2 W via SPI (using the spidev interface from the userspace GPIO, I2C and SPI lesson). Write a Python service that receives LoRa packets from a remote sensor node (placed outside Wi-Fi range) and republishes the data as MQTT messages on the local broker. This extends the gateway's range beyond Wi-Fi coverage.
   </Card>
   <Card title="Exercise 4: Containerized Gateway Services" icon="pencil">
     Package the data logger, dashboard, and camera services as Docker containers (or Podman on the Yocto image). Create a docker-compose.yml that brings up all services with proper networking and volume mounts. Compare the startup time, memory overhead, and ease of updates between the containerized approach and the native systemd approach used in this lesson.

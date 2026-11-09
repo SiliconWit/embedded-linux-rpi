@@ -25,13 +25,15 @@ import { Card, CardGrid, Badge, Steps, LinkButton, FileTree } from '@astrojs/sta
 
 import EmbeddedLinuxRpiComments from '../../../../components/embedded-linux-rpi/EmbeddedLinuxRpiComments.astro';
 
-On a microcontroller, you configure peripherals by writing directly to hardware registers. On embedded Linux, the kernel needs a structured description of what hardware exists, where it is mapped in memory, and which driver should manage it. That description lives in device tree files. In this lesson, you will read the base device tree for the BCM2710, understand how nodes, properties, and phandles work, and then write your own overlay that enables a BME280 sensor on I2C bus 1. After loading the overlay, the sensor appears automatically in the kernel's IIO subsystem, ready for userspace applications to read. #DeviceTree #I2C #EmbeddedLinux
+You wire a sensor to a Linux board, the kernel already contains its driver, and nothing happens. No error, no reading. The driver never started, because nothing told the kernel that the sensor exists. A sensor on an I2C bus cannot announce itself as a USB device does, so the kernel needs a written list of the hardware: what exists, at which address, and which driver manages it. That list is the device tree. In this lesson you read the base device tree of the Raspberry Pi Zero 2 W and write a small addition, an overlay, that declares a BME280 sensor on I2C bus 1. After the next boot the kernel starts the driver by itself, and you read temperature, pressure and humidity from plain files. #DeviceTree #I2C #EmbeddedLinux
 
 ## What We Are Building
 
 <Card title="Custom Device Tree Overlay for BME280 Sensor" icon="star">
-A device tree overlay (.dtbo) that declares a Bosch BME280 environmental sensor at address 0x76 on the I2C1 bus of the Raspberry Pi Zero 2 W. When the overlay is loaded at boot, the kernel instantiates the bme280 IIO driver automatically. You can then read temperature, humidity, and pressure values from sysfs without writing a single line of driver code.
+A device tree overlay (.dtbo) that declares a Bosch BME280 environmental sensor at address 0x76 on the I2C1 bus of the Raspberry Pi Zero 2 W. When the overlay is loaded at boot, the kernel starts its bmp280 driver, which also handles the BME280. The driver belongs to IIO (Industrial I/O), the kernel's framework for sensors, and IIO shows each reading as a small file under `/sys`. You write no driver code.
 </Card>
+
+The commands that run on the Pi in this lesson (`apt`, `sudo`, `i2cdetect`) need a full system such as Raspberry Pi OS on the card, not the minimal BusyBox system.
 
 **Project specifications:**
 
@@ -40,10 +42,7 @@ A device tree overlay (.dtbo) that declares a Bosch BME280 environmental sensor 
 | Overlay target | I2C1 bus (GPIO2 = SDA, GPIO3 = SCL) |
 | Sensor | Bosch BME280 (temperature, humidity, pressure) |
 | I2C address | 0x76 (default with SDO tied to GND) |
-| Kernel driver | bme280 (IIO subsystem) |
-| Overlay format | .dtbo compiled from .dts source |
-| Loading method | config.txt dtoverlay= directive |
-| Verification | sysfs IIO readings + i2cdetect confirmation |
+| Kernel driver | bmp280 (IIO subsystem; it also handles the BME280) |
 | Tools | dtc (device tree compiler), i2c-tools |
 
 ### Bill of Materials
@@ -60,11 +59,11 @@ A device tree overlay (.dtbo) that declares a Bosch BME280 environmental sensor 
 <InArticleAd />
 
 
-On a bare-metal microcontroller like the ATmega328P, you know exactly what hardware is available because you wrote the code to talk to specific registers at specific addresses. The chip's datasheet tells you that PORTB lives at address 0x25, TWBR at 0xB8, and so on. Your firmware is compiled for one specific chip, so the addresses are hardcoded.
+On a microcontroller such as the ATmega328P, your firmware is compiled for one chip. The datasheet says that PORTB is at address 0x25 and TWBR at 0xB8, and you write those addresses into the code.
 
-Linux kernels, however, run on hundreds of different boards. The same ARM kernel image can boot on a Raspberry Pi, a BeagleBone, or a custom industrial board. Each board has different peripherals wired in different ways. The kernel cannot hardcode all of these configurations. It needs a data structure, passed in at boot time, that says: "This board has 4 CPUs starting at address 0x0. It has an I2C controller at address 0x7e804000. GPIO pin 2 and pin 3 are assigned to that I2C controller."
+A Linux kernel cannot work that way, because the same kernel image must run on hundreds of boards: a Raspberry Pi, a BeagleBone, a custom industrial board. Each has different peripherals at different addresses. So the kernel carries no board addresses in its code. At boot it receives a description that says: "This board has 4 CPUs. It has an I2C controller at address 0x7e804000. GPIO pins 2 and 3 belong to that I2C controller."
 
-That data structure is the **device tree**.
+That description is the **device tree**. It is data, not code: it lists hardware and starts no driver by itself. The kernel reads it and starts a driver for each entry it recognizes.
 
 <CardGrid>
   <Card title="Without Device Trees" icon="warning">
@@ -75,36 +74,39 @@ That data structure is the **device tree**.
   </Card>
 </CardGrid>
 
+The board maker writes the base tree. It describes everything on the board itself, and it leaves the I2C bus switched off because nothing is connected to it yet:
+
 ```text
-  Device Tree: Base + Overlay
-  ──────────────────────────────────────────
-  bcm2710-rpi-zero-2-w.dts   (base, from SoC)
+  Base tree: bcm2710-rpi-zero-2-w.dts
+  ─────────────────────────────────────
   ┌───────────────────────────────┐
   │ / {                           │
-  │   cpus { cpu@0 { ... }; };   │
-  │   soc {                      │
-  │     i2c1: i2c@7e804000 {     │
-  │       status = "disabled";   │
-  │     };                       │
-  │   };                         │
-  │ };                           │
+  │   cpus { cpu@0 { ... }; };    │
+  │   soc {                       │
+  │     i2c1: i2c@7e804000 {      │
+  │       status = "disabled";    │
+  │     };                        │
+  │   };                          │
+  │ };                            │
   └───────────────────────────────┘
-         +
-  my-overlay.dts                 (your overlay)
-  ┌───────────────────────────────┐
-  │ &i2c1 {                      │
-  │   status = "okay";           │
-  │   bme280@76 {                │
-  │     compatible = "bosch,..."; │
-  │     reg = <0x76>;            │
-  │   };                         │
-  │ };                           │
-  └───────────────────────────────┘
-         =
-  Final merged tree at boot
 ```
 
-The device tree originated in Open Firmware (IEEE 1275) and was adopted by the Linux ARM community around 2011 to replace the explosion of board-specific C files in `arch/arm/mach-*`.
+What you connect to the header is not on that list. You describe it in an overlay, a small file that is added to the base tree at boot. This one switches the bus on and adds the sensor under it:
+
+```text
+  Overlay: my-overlay.dts
+  ─────────────────────────────────────
+  ┌───────────────────────────────┐
+  │ &i2c1 {                       │
+  │   status = "okay";            │
+  │   bme280@76 {                 │
+  │     compatible = "bosch,..."; │
+  │     reg = <0x76>;             │
+  │   };                          │
+  │ };                            │
+  └───────────────────────────────┘
+  base + overlay = the tree the kernel sees
+```
 
 <Card title="Key Terminology" icon="information">
 
@@ -115,10 +117,11 @@ The device tree originated in Open Firmware (IEEE 1275) and was adopted by the L
 | DTBO | Device Tree Blob Overlay, a compiled overlay fragment (.dtbo) |
 | DTC | Device Tree Compiler, the tool that converts DTS to DTB |
 | Node | A block in the tree representing a device or bus |
-| Property | A key-value pair inside a node (e.g., `compatible = "bosch,bme280"`) |
-| Phandle | A numeric reference that lets one node point to another |
+| Property | A key-value pair inside a node |
 
 </Card>
+
+You write the text form and the kernel reads the binary form:
 
 ```text
   DTS Compilation and Loading
@@ -146,7 +149,7 @@ The device tree originated in Open Firmware (IEEE 1275) and was adopted by the L
 <InArticleAd />
 
 
-A device tree source file is a text file with a tree structure. Every DTS file starts with a version tag and a root node.
+A device tree source file is a text file with a tree structure. The example describes a small board with memory, a GPIO controller and one LED. Notice that the LED points to the GPIO controller by name (`&gpio`) and gives a pin number.
 
 ### Minimal Example
 
@@ -156,10 +159,19 @@ A device tree source file is a text file with a tree structure. Every DTS file s
 / {
     model = "Minimal Example Board";
     compatible = "example,minimal";
+    #address-cells = <1>;
+    #size-cells = <1>;
 
     memory@0 {
         device_type = "memory";
         reg = <0x0 0x20000000>;
+    };
+
+    gpio: gpio@7e200000 {
+        compatible = "brcm,bcm2835-gpio";
+        reg = <0x7e200000 0xb4>;
+        gpio-controller;
+        #gpio-cells = <2>;
     };
 
     leds {
@@ -174,7 +186,7 @@ A device tree source file is a text file with a tree structure. Every DTS file s
 };
 ```
 
-Let's break down the syntax rules:
+The syntax rules, one at a time:
 
 ### Version Tag
 
@@ -182,7 +194,7 @@ Let's break down the syntax rules:
 /dts-v1/;
 ```
 
-This must be the first line. It tells the compiler you are using the current DTS syntax (version 1). Without it, the compiler assumes the legacy format.
+This must be the first line. It tells the compiler that the file uses the current DTS syntax.
 
 ### Root Node
 
@@ -192,7 +204,7 @@ This must be the first line. It tells the compiler you are using the current DTS
 };
 ```
 
-The forward slash represents the root of the tree. Every device tree has exactly one root node. All other nodes are children (or descendants) of this root.
+The forward slash is the root of the tree. A device tree has exactly one root node, and all other nodes are inside it.
 
 ### Child Nodes
 
@@ -204,7 +216,7 @@ memory@0 {
 };
 ```
 
-The `@0` is the **unit address**, which typically matches the first value in the `reg` property. It disambiguates nodes with the same base name (e.g., `uart@7e201000` vs `uart@7e215040`).
+The `@0` is the **unit address**. It is part of the node's name and should equal the first value in the `reg` property. It keeps two nodes with the same base name apart (`serial@7e201000` and `serial@7e215040`).
 
 ### Properties
 
@@ -224,38 +236,40 @@ reg = <0x7e804000 0x1000>;
 local-mac-address = [00 11 22 33 44 55];
 
 /* Empty (boolean: property exists = true) */
-status = "okay";
+gpio-controller;
 ```
 
 ### The `compatible` Property
 
-This is the most important property. The kernel uses it to match a device node to the correct driver. The format is `"manufacturer,device"`:
+This is the most important property, because it is how a node gets its driver. The format is `"manufacturer,device"`:
 
 ```dts
 compatible = "bosch,bme280";
 ```
 
-When the kernel encounters this node, it searches its driver database for a driver that lists `"bosch,bme280"` in its `of_match_table`. If found, the kernel binds that driver to this device.
+Every driver carries a list of the compatible strings it can handle (its `of_match_table`). When the kernel meets this node, it looks for a driver whose list contains `"bosch,bme280"` and gives the device to that driver. If the string differs by one character, no driver starts and no error is printed.
 
 ### The `reg` Property
 
-Describes the address range(s) of the device:
+Says where the device is: its address and, where it has one, the length of its address range.
 
 ```dts
 reg = <address length>;
 ```
 
-For an I2C device, `reg` is simply the I2C slave address:
+For a peripheral inside the chip, it is the first address and the number of bytes it occupies:
+
+```dts
+reg = <0x7e804000 0x1000>;
+```
+
+For an I2C device, `reg` is only the I2C address of the device on the bus:
 
 ```dts
 reg = <0x76>;
 ```
 
-For a memory-mapped peripheral, it includes the base address and size:
-
-```dts
-reg = <0x7e804000 0x1000>;
-```
+The parent node decides how many numbers `reg` has: `#address-cells` for the address and `#size-cells` for the length. An I2C bus sets them to 1 and 0.
 
 ### The `status` Property
 
@@ -270,7 +284,7 @@ Many nodes in the base device tree are set to `"disabled"` by default. An overla
 
 ### Labels and Phandles
 
-A label is a shorthand name placed before a node:
+A device often needs something from another device: an LED needs a pin of the GPIO controller. So a node can get a label, a short name placed before it:
 
 ```dts
 gpio: gpio@7e200000 {
@@ -285,7 +299,7 @@ Other nodes reference this label with `&gpio`:
 gpios = <&gpio 27 0>;
 ```
 
-The compiler converts the label reference into a numeric **phandle** in the compiled DTB. You never need to assign phandle numbers manually.
+Read this as: pin 27 of the controller labelled `gpio`, with flags 0 (`#gpio-cells = <2>` says that two numbers follow the reference). The compiler replaces the label reference with a number, the **phandle**. You never write phandle numbers yourself.
 
 ---
 
@@ -300,7 +314,7 @@ The Raspberry Pi Zero 2 W uses the BCM2710A1 SoC. The base device tree source li
 arch/arm/boot/dts/broadcom/bcm2710-rpi-zero-2-w.dts
 ```
 
-This file includes several shared fragments:
+Much of the description is the same for every board with this chip family, so the board file is short and includes shared files (`.dtsi`):
 
 <FileTree>
 - arch/arm/boot/dts/broadcom/
@@ -319,7 +333,7 @@ git clone --depth 1 https://github.com/raspberrypi/linux.git rpi-linux
 
 ### Key Nodes in the Base Tree
 
-Here are the important nodes you will encounter:
+Four nodes are worth reading. In each, find `compatible` (which driver), `reg` (where) and `status` (on or off).
 
 **CPU cluster:**
 
@@ -364,7 +378,7 @@ i2c1: i2c@7e804000 {
 };
 ```
 
-Notice that `status = "disabled"`. The base tree ships I2C1 as disabled. The Raspberry Pi firmware's `config.txt` option `dtparam=i2c_arm=on` loads an overlay that changes this to `"okay"`.
+Notice that `status = "disabled"`. The base tree ships I2C1 as disabled. The Raspberry Pi firmware's `config.txt` option `dtparam=i2c_arm=on` sets a parameter of the base device tree that changes this to `"okay"`.
 
 **SPI0 bus:**
 
@@ -381,18 +395,18 @@ spi0: spi@7e204000 {
 
 ### How the Bootloader Merges Overlays
 
-The Raspberry Pi boot process works as follows:
+The merge is done by the GPU firmware, before Linux starts:
 
 <Steps>
 1. The GPU firmware reads `config.txt` from the boot partition.
 2. It loads the base DTB file (e.g., `bcm2710-rpi-zero-2-w.dtb`) into memory.
 3. For each `dtoverlay=` line in `config.txt`, it loads the corresponding `.dtbo` file from `/boot/overlays/`.
 4. It merges each overlay into the base tree in order, modifying or adding nodes.
-5. The final merged device tree is passed to the kernel at the address specified in register x0 (AArch64) or r2 (AArch32).
-6. The kernel parses the tree and instantiates drivers for every node with `status = "okay"`.
+5. It gives the kernel the address of the final merged tree (in processor register x0 on a 64-bit system).
+6. The kernel reads the tree and starts a driver for every node with `status = "okay"`.
 </Steps>
 
-This means you never modify the base DTB directly. You write small overlay files that patch specific parts of the tree.
+So you never change the base DTB. You write small overlay files that change or add specific parts of the tree.
 
 ---
 
@@ -432,11 +446,11 @@ For an overlay (use the `-@` flag to preserve symbols for phandle resolution):
 dtc -@ -I dts -O dtb -o overlay.dtbo overlay.dts
 ```
 
-The `-@` flag tells the compiler to generate a `__symbols__` node, which the bootloader needs to resolve label references like `&i2c1` against the base tree.
+A compiled tree normally loses its labels. The `-@` flag keeps them, in a `__symbols__` node. The base DTB is built with this flag, which is how the firmware can find `&i2c1` at boot. Use it for your overlays too, so that their own labels (such as `bme280`) stay visible to overlay parameters and to later overlays.
 
 ### Decompile DTB to DTS
 
-This is invaluable for inspecting what is actually loaded on a running system:
+The compiler also works backwards. Use this to read what a binary file on the card really contains:
 
 ```bash
 dtc -I dtb -O dts -o readable.dts /boot/bcm2710-rpi-zero-2-w.dtb
@@ -453,7 +467,7 @@ dtc -I dtb -O dts -o readable.dts /boot/overlays/i2c-sensor.dtbo
 Check for syntax errors without producing output:
 
 ```bash
-dtc -I dts -O dtb /dev/null -o /dev/null my-overlay.dts
+dtc -@ -I dts -O dtb -o /dev/null my-overlay.dts
 ```
 
 Any warnings or errors will be printed to stderr.
@@ -465,9 +479,9 @@ Any warnings or errors will be printed to stderr.
 <InArticleAd />
 
 
-Now let's write a device tree overlay that tells the kernel: "There is a Bosch BME280 sensor at I2C address 0x76 on the I2C1 bus."
+Now write the overlay that tells the kernel: "There is a Bosch BME280 sensor at I2C address 0x76 on the I2C1 bus."
 
-Create a file called `bme280-sensor.dts`:
+An overlay has more wrapping than the base tree, because it must say where in the base tree its content goes. Create a file called `bme280-sensor.dts`:
 
 ```dts title="bme280-sensor.dts"
 /dts-v1/;
@@ -494,7 +508,7 @@ Create a file called `bme280-sensor.dts`:
 };
 ```
 
-Let's examine every line:
+Line by line:
 
 **`/dts-v1/;`**: Required version tag.
 
@@ -514,7 +528,7 @@ Let's examine every line:
 
 **`bme280@76`**: A child node representing the sensor. The `@76` is the unit address matching `reg`.
 
-**`compatible = "bosch,bme280";`**: The kernel's BME280 IIO driver registers itself for this compatible string. When the kernel sees this node, it loads the `bme280` driver module.
+**`compatible = "bosch,bme280";`**: The kernel's BME280 IIO driver registers itself for this compatible string. When the kernel sees this node, it loads the `bmp280-i2c` driver module (one driver covers the BMP280 and BME280 families).
 
 **`reg = <0x76>;`**: The I2C slave address. If you have connected the SDO pin of your BME280 module to VCC, use `<0x77>` instead.
 
@@ -595,11 +609,15 @@ If the compilation succeeds with no errors, you will have a `bme280-sensor.dtbo`
 If the IIO device does not appear, check `dmesg` for errors:
 
 ```bash
-dmesg | grep -i bme
+dmesg | grep -i bmp280
 dmesg | grep -i i2c
 ```
 
-Common issues include: the BME280 module not being wired correctly, the I2C bus not being enabled, or the kernel not having the `bme280` IIO driver built in (it may need to be loaded as a module with `sudo modprobe bme280`).
+The usual causes are:
+
+- the BME280 module is wired wrongly,
+- the I2C bus is not enabled,
+- the kernel was built without the `bmp280` driver, or has it as a module that is not loaded (load it with `sudo modprobe bmp280-i2c`).
 
 ---
 
@@ -608,7 +626,7 @@ Common issues include: the BME280 module not being wired correctly, the I2C bus 
 <InArticleAd />
 
 
-Most SoC pins can serve multiple functions. GPIO2 and GPIO3 on the BCM2710 can be general-purpose I/O pins, or they can serve as the SDA1 and SCL1 lines for the I2C1 controller. The decision about which function a pin performs is called **pin multiplexing**, and the subsystem that manages it in the device tree is called **pinctrl**.
+A chip has more internal peripherals than pins, so most pins can do one of several jobs. GPIO2 and GPIO3 on the BCM2710 can be general-purpose I/O pins, or the SDA1 and SCL1 lines of the I2C1 controller. If they are left as plain I/O, the signals of the I2C controller reach no pin. Choosing the job of a pin is called **pin multiplexing**, and the part of the kernel that does it is called **pinctrl**.
 
 ### How I2C1 Pins Are Configured in the Base DTS
 
@@ -644,7 +662,7 @@ The `pinctrl-0 = <&i2c1_pins>` line tells the kernel: "When this device is activ
 
 ### Adding pinctrl to a Custom Overlay
 
-If you are creating an overlay for a peripheral that needs specific pin assignments, you can include a pinctrl node in your overlay. Here is an example that defines a custom pin configuration for SPI0 and references it:
+If your peripheral needs pins that the base tree does not assign, add a pinctrl node to your overlay. The example has two fragments, because it changes two places in the base tree: the first adds a pin group for SPI0 to the GPIO node, and the second tells the SPI0 node to use that group.
 
 ```dts
 /dts-v1/;
@@ -676,7 +694,7 @@ If you are creating an overlay for a peripheral that needs specific pin assignme
 };
 ```
 
-For the BME280 I2C overlay, you do not need to add pinctrl explicitly because the `dtparam=i2c_arm=on` line in `config.txt` already loads an overlay that configures GPIO2/GPIO3 for I2C1. But understanding pinctrl is essential when you work with non-standard pin assignments or custom carrier boards.
+The BME280 overlay needs no pinctrl of its own. The base device tree already assigns GPIO2 and GPIO3 to I2C1 through `pinctrl-0 = <&i2c1_pins>`, so the bus only has to be enabled. You need your own pinctrl node when you use other pins or design your own carrier board.
 
 ---
 
@@ -685,11 +703,11 @@ For the BME280 I2C overlay, you do not need to add pinctrl explicitly because th
 <InArticleAd />
 
 
-The Raspberry Pi overlay system supports parameters that let you customize overlay behavior from `config.txt` without editing the DTS source. This is done with the `__overrides__` node.
+Some BME280 modules answer at 0x76 and others at 0x77. Without parameters you would need two overlay files that differ in one number. On the Raspberry Pi an overlay can declare parameters in an `__overrides__` node, and the user sets them in `config.txt`.
 
 ### Making the I2C Address Configurable
 
-Let's extend our BME280 overlay so the user can change the I2C address:
+This is the same overlay with one added node at the end:
 
 ```dts title="bme280-sensor-param.dts"
 /dts-v1/;
@@ -769,11 +787,11 @@ dtoverlay=bme280-sensor-param,addr=0x77,enable=okay
 <InArticleAd />
 
 
-When an overlay does not work as expected, you have several tools to diagnose the problem.
+A wrong device tree gives no error message: the driver does not start. So check in this order: is the node in the tree the kernel received, is its content right, and did a driver take it?
 
 ### Inspecting /proc/device-tree
 
-The running kernel exposes the entire device tree as a filesystem under `/proc/device-tree/` (which is a symlink to `/sys/firmware/devicetree/base/`):
+The running kernel shows the tree it received as directories and files under `/proc/device-tree/`. Each node is a directory and each property is a file:
 
 ```bash
 # List top-level nodes
@@ -800,7 +818,7 @@ You can decompile the entire runtime device tree back to readable DTS format:
 dtc -I fs /proc/device-tree -O dts -o runtime-tree.dts
 ```
 
-This produces a complete picture of the device tree after all overlays have been merged. Search this file for your sensor node to confirm it was loaded correctly:
+The file is the tree after all overlays were merged. Search it for your sensor node:
 
 ```bash
 grep -A 5 "bme280" runtime-tree.dts
@@ -811,7 +829,7 @@ grep -A 5 "bme280" runtime-tree.dts
 <CardGrid>
   <Card title="Wrong compatible string" icon="error">
     **Symptom:** Node appears in `/proc/device-tree/` but no driver binds. `dmesg` shows no related messages.
-    **Fix:** Check that the `compatible` string exactly matches what the driver expects. For BME280, it must be `"bosch,bme280"` (check `drivers/iio/pressure/bme280.h` in the kernel source).
+    **Fix:** Check that the `compatible` string exactly matches what the driver expects. For BME280, it must be `"bosch,bme280"` (check the match table in `drivers/iio/pressure/bmp280-i2c.c` in the kernel source).
   </Card>
   <Card title="Missing status property" icon="error">
     **Symptom:** Node exists in the tree but driver does not load.

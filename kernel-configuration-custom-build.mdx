@@ -25,7 +25,7 @@ import { Card, CardGrid, Badge, Steps, LinkButton, FileTree } from '@astrojs/sta
 
 import EmbeddedLinuxRpiComments from '../../../../components/embedded-linux-rpi/EmbeddedLinuxRpiComments.astro';
 
-The stock Raspberry Pi kernel includes drivers for thousands of devices you will never connect and subsystems your embedded application will never use. Every extra module increases boot time, memory usage, and attack surface. In this lesson, you will clone the official Raspberry Pi kernel source, learn how the Kconfig system organizes over 15,000 configuration options, and use menuconfig to strip the kernel down to exactly what your board needs. The result is a custom kernel image that boots in under 4 seconds, giving you a fast, lean foundation for every project in this course. #LinuxKernel #Menuconfig #EmbeddedLinux
+A machine that needs six seconds after power-on before it reacts feels broken to the person who switched it on. Much of that time is the kernel starting drivers for sound, cameras, Bluetooth and thousands of other devices that your board will never have. The ready-built Raspberry Pi kernel must serve every user, so it includes them all, and each one costs boot time and memory. In this lesson you get the kernel source, learn how its configuration system (Kconfig) organizes over 15,000 options, and use the menuconfig tool to keep only what your board needs. The result is your own kernel image that reaches the shell prompt in under 4 seconds. #LinuxKernel #Menuconfig #EmbeddedLinux
 
 ## What We Are Building
 
@@ -46,68 +46,16 @@ A custom-compiled Linux kernel for the Raspberry Pi Zero 2 W, configured with on
 | Build host | x86_64 Linux with aarch64-linux-gnu cross-toolchain |
 | Verification | Serial console boot log with timestamp analysis |
 
-### Key Subsystems to Disable
-
-| Subsystem | Config Symbol | Reason |
-|-----------|--------------|--------|
-| Sound/ALSA | CONFIG_SOUND | No audio needed |
-| Bluetooth | CONFIG_BT | Not used in this project |
-| USB Gadget | CONFIG_USB_GADGET | Zero 2 W is host only here |
-| Network filesystems | CONFIG_NETWORK_FILESYSTEMS | Local storage only |
-| Wireless (initially) | CONFIG_WLAN | Re-enable later if needed |
-| Virtualization | CONFIG_VIRTUALIZATION | Not applicable |
-| Multimedia (V4L2) | CONFIG_MEDIA_SUPPORT | No camera in this lesson |
-
-```text
-  Menuconfig Decision: Built-in vs Module
-  ──────────────────────────────────────────
-  [*] = Built-in (compiled into kernel)
-      + Available immediately at boot
-      + No insmod step needed
-      - Larger kernel image
-
-  [M] = Module (separate .ko file)
-      + Loaded only when needed
-      + Smaller kernel image
-      - Requires module load step
-
-  [ ] = Disabled (not compiled at all)
-      + Saves flash and RAM
-      - Cannot be used without recompiling
-
-  For fast boot: use [*] for essential
-  drivers, [ ] for everything else.
-```
-
 ## Cloning the Kernel Source
 
 <InArticleAd />
 
 
-The Raspberry Pi Foundation maintains a fork of the Linux kernel with patches and drivers specific to Broadcom SoCs. This is the kernel you should use for any Pi project, as it includes support for hardware that has not yet been merged into the mainline kernel.
+The kernel is the one program that touches the hardware. It shares the processor and the memory among all other programs, and it contains the drivers, the pieces of code that each know how to operate one device. A driver that is compiled in is started at boot, whether its device is connected or not. That is the cost you will remove.
 
-```text
-  Kernel Source Tree (simplified)
-  ──────────────────────────────────────────
-  rpi-linux/
-  ├── arch/arm64/       ARM64 platform code
-  │   ├── boot/dts/     Device tree sources
-  │   └── configs/      defconfig files
-  ├── drivers/          All device drivers
-  │   ├── gpio/
-  │   ├── i2c/
-  │   ├── spi/
-  │   └── usb/
-  ├── kernel/           Core scheduler, IPC
-  ├── mm/               Memory management
-  ├── net/              Networking stack
-  ├── fs/               Filesystems
-  ├── include/          Header files
-  ├── Kconfig           Top-level config
-  └── Makefile          Top-level build
-```
+The kernel is built from source code, so you can choose what goes in. Raspberry Pi maintains its own copy of the Linux source, with drivers for the Broadcom chips that the main Linux source does not yet include. Use this copy for any Pi project.
 
-Clone the repository with the `rpi-6.6.y` branch:
+Clone the repository with the `rpi-6.6.y` branch (kernel version 6.6):
 
 ```bash
 cd ~/rpi-embedded
@@ -130,7 +78,7 @@ Expected output:
 * rpi-6.6.y
 ```
 
-The kernel source tree is organized into well-defined directories. Here are the most important ones for embedded work:
+These are the directories that matter for embedded work:
 
 <FileTree>
 - rpi-linux/
@@ -158,22 +106,23 @@ The kernel source tree is organized into well-defined directories. Here are the 
   - Makefile
 </FileTree>
 
-Key directories for this lesson:
+What they hold:
 
-- `arch/arm64/configs/` contains default configuration files (defconfigs) for various ARM64 platforms.
-- `arch/arm64/boot/dts/broadcom/` contains device tree source files for Raspberry Pi boards.
-- `drivers/` contains all hardware drivers organized by subsystem.
-- `scripts/` contains build helper scripts, including `kconfig` tools.
-- `init/` contains the code that runs during kernel initialization, including the `init` process launcher.
+- `arch/arm64/configs/` contains ready-made starting configurations (defconfigs) for 64-bit ARM boards.
+- `arch/arm64/boot/dts/broadcom/` contains the device tree sources, the hardware lists for Raspberry Pi boards.
+- `drivers/` contains all hardware drivers, one directory per kind of device.
+- `scripts/` contains build helper scripts, including the `kconfig` tools.
+- `init/` contains the code that runs when the kernel starts, including the part that starts the `init` process.
+- `mm/`, `fs/` and `net/` contain memory management, the filesystems and networking.
 
 ## Understanding Kconfig
 
 <InArticleAd />
 
 
-The Linux kernel has over 15,000 configuration options. The system that manages them is called **Kconfig**, and understanding it is essential for anyone building custom kernels.
+The Linux kernel has over 15,000 configuration options, and many depend on others: an SPI driver for one chip is useless if SPI support itself is off. Nobody can keep these rules in their head. If you switch options by hand and break a rule, the build fails, or the kernel builds and then does not boot. The system that records the options and their rules is called **Kconfig**.
 
-Every directory in the kernel source contains a `Kconfig` file that defines the configuration options for that subsystem. These files use a simple language to declare options, their types, defaults, and dependencies. For example, a simplified entry looks like:
+Each directory of the kernel source has a `Kconfig` file that declares the options for its part of the kernel (a subsystem): the name, the type, the default and what the option depends on. A simplified entry looks like this:
 
 ```kconfig
 config SPI
@@ -191,14 +140,14 @@ The configuration system works with three key files:
 | `.config` | The active configuration file in the build root. Contains all selected options. This is what `make` reads. |
 | `defconfig` | A minimal configuration file that records only the options that differ from defaults. Used to create reproducible configurations. |
 
-The workflow is: start from a defconfig that is close to your target hardware, then customize it. For the Raspberry Pi Zero 2 W, the closest defconfig is `bcm2711_defconfig`:
+You never start from nothing. You start from a defconfig that is close to your board, then change it. For the Raspberry Pi Zero 2 W, the closest defconfig is `bcm2711_defconfig`:
 
 ```bash
 cd ~/rpi-embedded/rpi-linux
 make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- bcm2711_defconfig
 ```
 
-This generates a `.config` file with sensible defaults for Broadcom BCM27xx boards. You can examine it:
+This writes a `.config` file with working defaults for Broadcom BCM27xx boards. Keep a copy of it now, because you will compare your changes with it later (`cp .config .config.backup`). Then count its lines:
 
 ```bash
 wc -l .config
@@ -215,7 +164,7 @@ grep CONFIG_BT .config
 ```
 
 <Card title="Why bcm2711_defconfig for a BCM2710?" icon="information">
-The BCM2710A1 (used in the Zero 2 W) and BCM2711 (used in the Pi 4) share the same ARM Cortex-A53 architecture at the 64-bit level. The `bcm2711_defconfig` enables all the necessary Broadcom peripheral drivers that work across both chips. The differences (number of cores, peripheral addresses) are handled by the device tree, not the kernel configuration.
+The BCM2710A1 (Cortex-A53 cores, in the Zero 2 W) and the BCM2711 (Cortex-A72 cores, in the Pi 4) are both 64-bit ARMv8-A chips. The `bcm2711_defconfig` enables the Broadcom peripheral drivers that work on both. The differences between the chips (the type of CPU core, the addresses of the peripherals) are described in the device tree, not in the kernel configuration.
 </Card>
 
 ## Using menuconfig
@@ -223,9 +172,9 @@ The BCM2710A1 (used in the Zero 2 W) and BCM2711 (used in the Pi 4) share the sa
 <InArticleAd />
 
 
-While you could edit `.config` by hand, the preferred method is `menuconfig`, a text-based graphical interface that lets you navigate options by category, search for symbols, and see dependency information.
+You could edit `.config` by hand, but then nothing checks the dependency rules. `menuconfig` is a menu program in the terminal that knows the rules: it shows the options by category, finds an option by name, and shows what each one depends on.
 
-Install the required library:
+Install the libraries it needs:
 
 ```bash
 sudo apt install -y libncurses-dev flex bison libssl-dev
@@ -238,7 +187,7 @@ cd ~/rpi-embedded/rpi-linux
 make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- menuconfig
 ```
 
-A blue-and-gray interface appears in your terminal. Here are the key controls:
+A blue and gray menu appears in your terminal. These keys control it:
 
 | Key | Action |
 |-----|--------|
@@ -256,9 +205,12 @@ The main menu is organized into top-level categories:
 
 ```
   General setup  --->
-  Processor type and features  --->
-  Power management and ACPI options  --->
-  Bus options  --->
+  Platform selection  --->
+  Kernel Features  --->
+  Boot options  --->
+  Power management options  --->
+  CPU Power Management  --->
+  [*] Virtualization  --->
   Networking support  --->
   Device Drivers  --->
   File systems  --->
@@ -270,7 +222,7 @@ The main menu is organized into top-level categories:
 To find a specific option, press `/` and type the config symbol name (without the `CONFIG_` prefix). For example, searching for `SOUND` will show you where the sound subsystem option lives, what it depends on, and what selects it.
 
 <Card title="Save your configuration" icon="warning">
-When you exit menuconfig, it will ask if you want to save. Always save. The changes are written to `.config`. If you want to keep a backup before experimenting, copy the file: `cp .config .config.backup`
+When you exit menuconfig, it asks if you want to save. Always save. The changes are written to `.config`. Your copy `.config.backup` keeps the starting point, so you can always go back to it.
 </Card>
 
 ## Stripping the Kernel
@@ -278,9 +230,9 @@ When you exit menuconfig, it will ask if you want to save. Always save. The chan
 <InArticleAd />
 
 
-Now comes the most impactful part of this lesson: disabling subsystems that your embedded project does not need. Each disabled subsystem means less code to compile, a smaller kernel image, less memory usage, and faster boot time.
+Now disable the subsystems your project does not need. Each one you remove means less code to compile, a smaller kernel image, less memory used, and a shorter boot.
 
-Navigate through menuconfig and disable the following. For each one, the location in the menu tree and the config symbol are provided.
+For each subsystem below you get its place in the menu and its config symbol. Find it in menuconfig and press N.
 
 ### Sound (CONFIG_SOUND)
 
@@ -344,7 +296,7 @@ Device Drivers  --->
     Wireless LAN  --->
 ```
 
-Press N on "Wireless LAN". We will re-enable this in a later lesson when we configure WiFi. For now, a serial-only system boots faster without wireless drivers.
+Press N on "Wireless LAN". A system you reach only over the serial console boots faster without wireless drivers. Enable it again when a project needs Wi-Fi, for example to copy files to the board over the network.
 
 ### Additional options to disable
 
@@ -361,20 +313,20 @@ You can also turn off these to further reduce size:
 
 After making all these changes, save and exit menuconfig.
 
-You can verify your changes by comparing against the original defconfig:
+Compare your result with the copy you made at the start:
 
 ```bash
 scripts/diffconfig .config.backup .config
 ```
 
-This shows a concise list of what changed. You should see dozens of options switching from `y` or `m` to `n`.
+This prints a short list of what changed. You should see dozens of options that went from `y` or `m` to `n`. One N in the menu can switch off many options, because everything that depends on a disabled subsystem goes with it.
 
 ## Module vs Built-in
 
 <InArticleAd />
 
 
-Every kernel option that represents a driver or feature can typically be set to one of three states:
+A driver does not have to be inside the kernel image. It can also be a module: a separate file on the root filesystem that the running kernel loads when the driver is needed and can remove again. A built-in driver is like a tool you carry in your pocket: ready at once, but carried every day. A module is like a tool on a shelf in the store room: it costs nothing until you go and fetch it. So most driver options have three states:
 
 | Symbol | menuconfig display | Meaning |
 |--------|-------------------|---------|
@@ -382,13 +334,13 @@ Every kernel option that represents a driver or feature can typically be set to 
 | `m` | `[M]` or `<M>` | **Module.** Compiled as a separate `.ko` file. Must be loaded at runtime with `modprobe` or `insmod`. |
 | `n` | `[ ]` or `< >` | **Disabled.** Not compiled at all. |
 
-For an embedded system focused on fast boot times, the decision is straightforward:
+For an embedded system that must boot fast, the choice follows three rules.
 
-**Boot-critical drivers should be built-in (y).** The SD card driver (`CONFIG_MMC`), the filesystem driver (`CONFIG_EXT4_FS`), and the serial console driver (`CONFIG_SERIAL_AMBA_PL011`) must all be built-in. If these are modules, the kernel cannot mount the root filesystem or print to the console during early boot, because the module files live on the root filesystem that has not been mounted yet.
+**Drivers needed to boot must be built-in (y).** These are the SD card driver (`CONFIG_MMC`), the filesystem driver (`CONFIG_EXT4_FS`) and the serial console driver (`CONFIG_SERIAL_AMBA_PL011`). The module files are stored on the root filesystem. A kernel that needs a module to read the SD card can never reach that module, like a key locked inside the box it opens.
 
-**Optional drivers can be modules (m).** If you plan to occasionally use a USB Ethernet adapter, compile its driver as a module. It only takes up space on disk, not in RAM, and you load it only when needed.
+**Drivers you use only sometimes can be modules (m).** If you sometimes plug in a USB Ethernet adapter, compile its driver as a module. It uses space on the card and no RAM until you load it.
 
-**Unused drivers should be disabled (n).** This is where the biggest gains come from. Every disabled driver is code that does not need to be compiled, loaded, or initialized.
+**Drivers you never use should be disabled (n).** This gives the largest gain. A disabled driver is not compiled, not loaded and not started.
 
 For this lesson, set the following to built-in:
 
@@ -413,16 +365,16 @@ You can also set these directly in `.config` if you prefer not to navigate menuc
 make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- olddefconfig
 ```
 
-This command reads `.config`, applies Kconfig dependency rules, and resolves any conflicts by choosing default values for newly required options.
+This command reads `.config` and applies the Kconfig dependency rules. An option whose dependencies are not met is removed, and an option that is newly required gets its default value. Check afterwards with `grep` that the lines you wrote are still there.
 
 ## Building the Kernel
 
 <InArticleAd />
 
 
-With the configuration finalized, it is time to compile. The build process produces several artifacts: the kernel image, loadable modules, and device tree blobs.
+The build produces three kinds of files: the kernel image, the loadable modules, and the device tree blobs (the compiled hardware lists).
 
-Set up environment variables for convenience:
+Set three environment variables so that you do not have to type them in every command:
 
 ```bash
 export ARCH=arm64
@@ -439,7 +391,7 @@ make -j$(nproc) Image.gz modules dtbs
 
 The `-j$(nproc)` flag runs as many parallel compiler processes as your host has CPU cores. On a modern 8-core machine, the full kernel build takes roughly 5 to 15 minutes, depending on how much you disabled.
 
-Let us break down what each target produces:
+Each target produces one kind of file:
 
 | Target | Output File | Purpose |
 |--------|------------|---------|
@@ -473,7 +425,7 @@ make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- \
 This installs modules into `~/rpi-embedded/modules_out/lib/modules/<kernel-version>/`.
 
 <Card title="Image vs Image.gz" icon="information">
-For most embedded projects, `Image.gz` is the better choice. The compressed image is smaller (faster SD card read) and the decompression penalty is minimal on the Cortex-A53. However, if you are measuring boot time at the microsecond level and your storage is fast, the uncompressed `Image` eliminates one step from the boot sequence. In this lesson we use `Image.gz`.
+For most embedded projects, `Image.gz` is the better choice. The compressed image is smaller, so it is read from the SD card faster, and unpacking it costs little time. If your storage is fast and every millisecond of boot counts, the uncompressed `Image` removes the unpacking step. In this lesson we use `Image.gz`.
 </Card>
 
 ## Deploying to the SD Card
@@ -481,7 +433,7 @@ For most embedded projects, `Image.gz` is the better choice. The compressed imag
 <InArticleAd />
 
 
-Insert the SD card you prepared in Lesson 1 and mount both partitions:
+Insert the SD card you prepared for the [first boot](/education/embedded-linux-rpi/cross-compilation-boot-process/) and mount both partitions:
 
 ```bash
 sudo mount /dev/sdX1 /mnt/boot
@@ -520,10 +472,11 @@ Replace the stock kernel with your custom build:
 5. **Install kernel modules (if any)**
 
    ```bash
+   sudo mkdir -p /mnt/rootfs/lib/modules
    sudo cp -a ~/rpi-embedded/modules_out/lib/modules/* /mnt/rootfs/lib/modules/
    ```
 
-   If you built everything as built-in, this directory may be nearly empty, which is expected.
+   Modules are stored in a directory named after the kernel version, and a kernel loads modules only from its own build. So copy them every time you copy a new kernel. If you built everything as built-in, the directory is nearly empty, which is expected.
 
 6. **Unmount and sync**
 
@@ -539,7 +492,7 @@ Replace the stock kernel with your custom build:
 <InArticleAd />
 
 
-One of the most satisfying parts of building a custom kernel is seeing the boot time improvement. To measure it accurately, you need timestamps on every kernel log message.
+To know what you gained, measure it. The kernel can print the time, in seconds since it started, in front of every log message.
 
 Edit `cmdline.txt` on the boot partition to add the `printk.time=1` parameter. Your full `cmdline.txt` should look like:
 
@@ -559,7 +512,7 @@ After the boot completes, exit picocom (press `Ctrl+A` then `Ctrl+X`) and examin
 [    0.000000] Booting Linux on physical CPU 0x0000000000 [0x410fd034]
 [    0.000000] Linux version 6.6.x ...
 ...
-[    0.512345] mmc0: SDHCI controller on fe340000.mmc ...
+[    0.512345] mmc0: sdhost-bcm2835 loaded - DMA enabled (>1)
 [    1.023456] mmc0: new high speed SDHC card at address 0001
 [    1.034567] mmcblk0: mmc0:0001 SD 14.8 GiB
 ...
@@ -569,32 +522,32 @@ After the boot completes, exit picocom (press `Ctrl+A` then `Ctrl+X`) and examin
 [    2.100000] Run /sbin/init as init process
 ```
 
-The timestamp on the "Run /sbin/init" line tells you the kernel boot time. For a stripped kernel, you should see this well under 3 seconds, compared to 5 or more seconds with the stock kernel.
+The timestamp on the "Run /sbin/init" line is the kernel boot time: at that moment the kernel has finished its own start and gives control to the first program. For a stripped kernel it should be well under 3 seconds, against 5 or more seconds with the stock kernel. The time the GPU firmware needs before the kernel starts is not in this number.
 
-To analyze the boot time more systematically, run `dmesg` on the Pi after boot:
+On the Pi, the command `dmesg` prints the same log again after boot:
 
 ```bash
 dmesg | head -5
 dmesg | tail -10
 ```
 
-You can also extract the total kernel initialization time:
+Find the kernel boot time directly:
 
 ```bash
 dmesg | grep "Run /sbin/init"
 ```
 
-For a more detailed breakdown, you can identify the slowest subsystems:
+To find where the time goes, look for the largest gaps between two messages. The command below takes the timestamp of each line, subtracts the one before it, and sorts the differences:
 
 ```bash
 # Show the 10 largest time gaps between consecutive messages
 dmesg | awk '{print $1}' | tr -d '[]' | awk 'NR>1{printf "%.6f %s\n", $1-prev, $1} {prev=$1}' | sort -rn | head -10
 ```
 
-This helps you identify which driver or subsystem is consuming the most time during boot. If a particular driver takes 500 ms to initialize and you do not need it, that is a strong candidate for disabling.
+Each output line is a gap in seconds and the timestamp where it ends. Look in the log at that timestamp to see which driver was starting. A driver that takes 500 ms and that you do not need is the next one to disable.
 
 <Card title="Comparing before and after" icon="star">
-If you completed Exercise 4 from Lesson 1, you have a baseline boot time measurement with the stock kernel. Compare that number with your custom kernel's boot time. A typical result: stock kernel boots to init in 4 to 6 seconds; a stripped kernel boots to init in 1.5 to 2.5 seconds. That is a 2x to 3x improvement from configuration alone, without any code changes.
+If you measured the boot time of the stock kernel in the first-boot exercises, compare that number with your own kernel. A typical result: the stock kernel reaches init in 4 to 6 seconds, and a stripped kernel in 1.5 to 2.5 seconds. That is two to three times faster from configuration alone, with no change to any code.
 </Card>
 
 ## Kernel Command Line Parameters
@@ -602,9 +555,9 @@ If you completed Exercise 4 from Lesson 1, you have a baseline boot time measure
 <InArticleAd />
 
 
-The kernel command line (stored in `cmdline.txt` on the Raspberry Pi) controls kernel behavior at boot time. Understanding these parameters gives you fine-grained control over how the system starts.
+The configuration you just built is fixed inside the kernel image. The kernel command line is for the choices that can change from one boot to the next without a rebuild: where the root filesystem is, where messages go, which program starts first. On the Raspberry Pi it is the text in `cmdline.txt`.
 
-Here are the most important parameters for embedded Linux work:
+These are the parameters you will use most:
 
 | Parameter | Example | Purpose |
 |-----------|---------|---------|
@@ -614,8 +567,8 @@ Here are the most important parameters for embedded Linux work:
 | `rootwait` | (no value) | Tells the kernel to wait indefinitely for the root device to appear. Essential for SD cards, which take time to initialize. Without this, the kernel may panic because the card is not ready yet. |
 | `init=` | `init=/sbin/init` | Specifies the first userspace process. If omitted, the kernel tries `/sbin/init`, `/etc/init`, `/bin/init`, and `/bin/sh` in order. |
 | `printk.time=` | `printk.time=1` | Adds timestamps to kernel log messages. Invaluable for boot time analysis. |
-| `quiet` | (no value) | Suppresses most kernel log messages, printing only errors and warnings. Makes the console output cleaner but hides useful information during development. |
-| `loglevel=` | `loglevel=3` | Controls which messages appear on the console. 0 = emergencies only; 7 = debug messages. Default is 7. Use 3 (errors and above) for production. |
+| `quiet` | (no value) | Suppresses most kernel log messages, printing only errors and more severe messages (it sets the console log level to 4). Makes the console output cleaner but hides useful information during development. |
+| `loglevel=` | `loglevel=3` | Controls which messages appear on the console: only messages with a level number below this value are printed (0 = emergency, 3 = error, 7 = debug). The default is 7, which shows everything except debug messages. With 3, only critical messages and worse (levels 0 to 2) appear; use 4 if you also want errors. |
 
 You can combine parameters for different scenarios:
 
@@ -630,13 +583,13 @@ Maximum verbosity. All kernel messages with timestamps. Useful for debugging boo
 ```
 console=serial0,115200 root=/dev/mmcblk0p2 rootfstype=ext4 rootwait init=/sbin/init quiet loglevel=3
 ```
-Minimal output. Only errors reach the console. The `quiet` flag also skips printing the kernel version banner, saving a small amount of boot time.
+Minimal output. Only critical messages and worse reach the console. The `quiet` flag also skips printing the kernel version banner, saving a small amount of boot time.
   </TabItem>
   <TabItem label="Fastest boot">
 ```
 console=serial0,115200 root=/dev/mmcblk0p2 rootfstype=ext4 rootwait init=/bin/hello_linux quiet loglevel=0
 ```
-Skip init entirely and run your application directly as PID 1. The kernel boots, mounts the root filesystem, and immediately executes your binary. This is the fastest possible path to running your code, but your application must handle everything that init normally does (mounting filesystems, etc.). Use this only for single-purpose appliances.
+Skip init entirely and run your application directly as PID 1. The kernel boots, mounts the root filesystem, and immediately executes your binary. This is the fastest possible path to running your code, but your application must handle everything that init normally does (mounting filesystems, etc.). It must also never exit: when PID 1 returns, the kernel panics, so `hello_linux` as written prints its report and then causes a panic. Use this only for single-purpose appliances whose program runs forever.
   </TabItem>
 </Tabs>
 
@@ -649,7 +602,7 @@ You can also pass arbitrary parameters through `cmdline.txt` that your own init 
 <InArticleAd />
 
 
-After investing time in a carefully tuned kernel configuration, you should save it in a reproducible format. The `.config` file contains thousands of lines, many of which are just defaults. A defconfig is a minimal representation that only stores the options you explicitly set.
+Your configuration now exists only as a `.config` file in one folder on one PC. If that file is lost, the work is lost. The `.config` file is also a poor thing to keep: it has thousands of lines, and most of them are defaults. A defconfig stores only the options that differ from the defaults, so it is short and you can read what you changed.
 
 Save your configuration as a defconfig:
 
@@ -664,13 +617,13 @@ This creates a file called `defconfig` in the kernel build root. Rename and save
 cp defconfig arch/arm64/configs/rpi_zero2w_minimal_defconfig
 ```
 
-Now anyone (including your future self) can reproduce your exact configuration:
+Now anyone can produce the same configuration again:
 
 ```bash
 make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- rpi_zero2w_minimal_defconfig
 ```
 
-This is the standard practice in embedded Linux teams: check your defconfig into version control and rebuild from it on any machine.
+Embedded Linux teams keep the defconfig in version control and rebuild from it on any machine.
 
 ## Exercises
 
