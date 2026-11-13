@@ -571,10 +571,16 @@ Your own program is not in Buildroot's list. If you copied a compiled file into 
 
 6. **Register the package with Buildroot**
 
-   Add your package to Buildroot's package Config.in so menuconfig can find it:
+   Add your package to Buildroot's package Config.in so menuconfig can find it. The file is one big `menu "Target packages"` block that closes with `endmenu` on its last lines, so do not append to the end of the file: a line after that `endmenu` lands outside the menu. Open `package/Config.in` in an editor and add this line inside the block, for example just above its final `endmenu`:
 
    ```bash
-   echo 'source "package/sensor-monitor/Config.in"' >> package/Config.in
+   source "package/sensor-monitor/Config.in"
+   ```
+
+   Check that it is there:
+
+   ```bash
+   grep -n "sensor-monitor" package/Config.in
    ```
 
    Then enable it:

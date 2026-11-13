@@ -554,7 +554,7 @@ Look for the newly appeared device (typically `/dev/sdb` or `/dev/mmcblk0`). In 
    sudo parted /dev/sdX --script mkpart primary ext4 128MiB 100%
    ```
 
-   This creates a 128 MB FAT32 boot partition and uses the remaining space for the ext4 root partition.
+   This creates a FAT32 boot partition from 1 MiB to 128 MiB (127 MiB) and uses the remaining space for the ext4 root partition.
 
 2. **Format the partitions**
 
